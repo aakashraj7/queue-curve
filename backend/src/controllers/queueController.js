@@ -6,30 +6,152 @@ const {
   getQueueData: fetchQueueData
 } = require('../socket/socketHandler');
 
-// Get all queue data: active queue, skipped queue, settings, and analytics
+// Helper to generate a random 4-character uppercase alphanumeric session ID
+const generateSessionId = () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 4; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+};
+
+// Helper to get unique session ID
+const getUniqueSessionId = async () => {
+  let attempts = 0;
+  while (attempts < 100) {
+    const code = generateSessionId();
+    const exists = await QueueSettings.exists({ sessionId: code });
+    if (!exists) return code;
+    attempts++;
+  }
+  throw new Error('Failed to generate a unique session ID.');
+};
+
+// Validate session and retrieve doctor profiles
+const validateSession = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const cleanId = sessionId.trim().toUpperCase();
+
+    const settings = await QueueSettings.findOne({ sessionId: cleanId });
+    if (!settings || !settings.isInitialized) {
+      return res.status(404).json({ message: `Active session "${cleanId}" not found.` });
+    }
+
+    res.json({ isValid: true, settings });
+  } catch (error) {
+    res.status(500).json({ message: 'Error validating session', error: error.message });
+  }
+};
+
+// Get all queue data for a session
 const getQueueData = async (req, res) => {
   try {
-    const data = await fetchQueueData();
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+    const data = await fetchQueueData(sessionId);
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching queue data', error: error.message });
   }
 };
 
+// Initialize a new clinic session setup
+const initializeSession = async (req, res) => {
+  try {
+    const { averageConsultationTime, doctors } = req.body;
+
+    const time = parseInt(averageConsultationTime, 10);
+    if (isNaN(time) || time < 1) {
+      return res.status(400).json({ message: 'Average consultation time must be a number greater than 0.' });
+    }
+
+    if (!Array.isArray(doctors) || doctors.length === 0) {
+      return res.status(400).json({ message: 'At least one doctor is required to initialize the session.' });
+    }
+
+    // Validate doctors list
+    for (const doc of doctors) {
+      if (!doc.code || !doc.code.trim() || !doc.name || !doc.name.trim()) {
+        return res.status(400).json({ message: 'Each doctor must have a valid name and unique code.' });
+      }
+    }
+
+    // Generate unique session ID
+    const sessionId = await getUniqueSessionId();
+
+    // Wipe any existing patient logs that might conflict with this new session ID (cleanup safety)
+    await Patient.deleteMany({ sessionId });
+
+    // Save session configurations
+    const settings = new QueueSettings({
+      sessionId,
+      averageConsultationTime: time,
+      doctors: doctors.map(d => ({ code: d.code.trim().toUpperCase(), name: d.name.trim() })),
+      isInitialized: true
+    });
+    
+    await settings.save();
+
+    res.status(201).json({ message: 'Session initialized successfully.', settings, sessionId });
+  } catch (error) {
+    res.status(500).json({ message: 'Error initializing session', error: error.message });
+  }
+};
+
+// Reset/Wipe session settings and clear associated active patient queues
+const resetSession = async (req, res) => {
+  try {
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
+    // 1. Wipe all patient logs under this session
+    await Patient.deleteMany({ sessionId });
+
+    // 2. Delete the session settings
+    await QueueSettings.deleteOne({ sessionId });
+
+    // 3. Broadcast reset room-wide
+    await broadcastQueueUpdate(sessionId, 'session-reset');
+
+    res.status(200).json({ message: 'Session reset and wiped successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Error resetting session', error: error.message });
+  }
+};
+
 // Add a new patient to the queue
 const addPatient = async (req, res) => {
   try {
-    const { patientName } = req.body;
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
+    const { patientName, assignedDoctors, tokenNumber: manualTokenNumber } = req.body;
 
     if (!patientName || !patientName.trim()) {
       return res.status(400).json({ message: 'Patient name is required.' });
     }
 
-    // Edge Case: Check for duplicate patient in the active queue
+    // Verify session still exists
+    const settings = await QueueSettings.findOne({ sessionId });
+    if (!settings || !settings.isInitialized) {
+      return res.status(400).json({ message: 'Clinic session is active no longer. Please reload or log in.' });
+    }
+
     const nameClean = patientName.trim();
+
+    // Check for duplicate patient in active states in this session
     const existingPatient = await Patient.findOne({
+      sessionId,
       patientName: { $regex: new RegExp(`^${nameClean}$`, 'i') },
-      status: { $in: ['waiting', 'serving'] }
+      status: { $in: ['waiting', 'calling', 'serving'] }
     });
 
     if (existingPatient) {
@@ -38,28 +160,57 @@ const addPatient = async (req, res) => {
       });
     }
 
-    // Auto-generate daily token number (starts at 1 and resets every day)
+    // Process doctor assignment lists
+    let doctorsArray = ['all'];
+    if (Array.isArray(assignedDoctors) && assignedDoctors.length > 0) {
+      doctorsArray = assignedDoctors.map(d => d.trim().toUpperCase());
+    }
+
+    // Setup Token Number
+    let tokenNumber;
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const latestPatient = await Patient.findOne({
-      createdAt: { $gte: startOfToday }
-    }).sort({ tokenNumber: -1 });
+    if (manualTokenNumber !== undefined && manualTokenNumber !== null && manualTokenNumber !== '') {
+      const parsedToken = parseInt(manualTokenNumber, 10);
+      if (isNaN(parsedToken) || parsedToken < 1) {
+        return res.status(400).json({ message: 'Manual token number must be a valid positive integer.' });
+      }
 
-    const tokenNumber = latestPatient ? latestPatient.tokenNumber + 1 : 1;
+      // Check if token number already exists in this session today
+      const existingToken = await Patient.findOne({
+        sessionId,
+        tokenNumber: parsedToken,
+        createdAt: { $gte: startOfToday }
+      });
+      if (existingToken) {
+        return res.status(400).json({ message: `Token number ${parsedToken} has already been assigned today in this session.` });
+      }
+      tokenNumber = parsedToken;
+    } else {
+      // Auto-generate daily token number
+      const latestPatient = await Patient.findOne({
+        sessionId,
+        createdAt: { $gte: startOfToday }
+      }).sort({ tokenNumber: -1 });
 
-    // Create patient
+      tokenNumber = latestPatient ? latestPatient.tokenNumber + 1 : 1;
+    }
+
+    // Create patient record
     const newPatient = new Patient({
+      sessionId,
       tokenNumber,
       patientName: nameClean,
+      assignedDoctors: doctorsArray,
       status: 'waiting'
     });
 
     await newPatient.save();
 
     // Recalculate wait times and broadcast
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('patient-added', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'patient-added', {
       patientName: newPatient.patientName,
       tokenNumber: newPatient.tokenNumber
     });
@@ -70,75 +221,144 @@ const addPatient = async (req, res) => {
   }
 };
 
-// Call the next patient (makes the current serving patient completed, and moves the first waiting to serving)
-const callNextPatient = async (req, res) => {
+// Doctor specific call-next endpoint
+const callNextPatientDoctor = async (req, res) => {
   try {
-    // 1. Complete the currently serving patient if there is one
-    const currentServing = await Patient.findOne({ status: 'serving' });
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
+    const { code } = req.params;
+    const docCode = code.trim().toUpperCase();
+
+    // Validate doctor code exists in session settings
+    const settings = await QueueSettings.findOne({ sessionId });
+    if (!settings || !settings.isInitialized) {
+      return res.status(400).json({ message: 'Session is not initialized.' });
+    }
+    const docExists = settings.doctors.some(d => d.code === docCode);
+    if (!docExists) {
+      return res.status(400).json({ message: `Doctor code "${docCode}" is not registered in this session.` });
+    }
+
+    // 1. If this doctor has a patient currently 'calling', automatically skip them (did not show up)
+    const currentCalling = await Patient.findOne({ sessionId, calledBy: docCode, status: 'calling' });
+    if (currentCalling) {
+      currentCalling.status = 'skipped';
+      await currentCalling.save();
+      await broadcastQueueUpdate(sessionId, 'patient-skipped', {
+        patientName: currentCalling.patientName,
+        tokenNumber: currentCalling.tokenNumber
+      });
+    }
+
+    // 2. If this doctor has a patient currently 'serving', automatically mark them completed
+    const currentServing = await Patient.findOne({ sessionId, calledBy: docCode, status: 'serving' });
     if (currentServing) {
       currentServing.status = 'completed';
       currentServing.completedAt = new Date();
       await currentServing.save();
-      
-      // Emit completed event for toast notifications
-      await broadcastQueueUpdate('patient-completed', {
+      await broadcastQueueUpdate(sessionId, 'patient-completed', {
         patientName: currentServing.patientName,
         tokenNumber: currentServing.tokenNumber
       });
     }
 
-    // 2. Fetch the next waiting patient
-    const nextPatient = await Patient.findOne({ status: 'waiting' }).sort({ createdAt: 1 });
+    // 3. Find next waiting patient assigned to this doctor or assigned to 'all'
+    const nextPatient = await Patient.findOne({
+      sessionId,
+      status: 'waiting',
+      $or: [
+        { assignedDoctors: docCode },
+        { assignedDoctors: 'all' }
+      ]
+    }).sort({ createdAt: 1 });
 
     if (!nextPatient) {
-      // If we finished the queue, we still recalculate & broadcast the empty state
-      await recalculateWaitTimes();
-      await broadcastQueueUpdate();
-      return res.json({ message: 'Queue is empty. No patient waiting.', nextPatient: null });
+      await recalculateWaitTimes(sessionId);
+      await broadcastQueueUpdate(sessionId);
+      return res.json({ message: 'No patient waiting in your queue.', nextPatient: null });
     }
 
-    // 3. Mark next patient as serving
-    nextPatient.status = 'serving';
+    // 4. Mark next patient as calling (flashes on screen)
+    nextPatient.status = 'calling';
+    nextPatient.calledBy = docCode;
     nextPatient.calledAt = new Date();
     await nextPatient.save();
 
-    // Recalculate and broadcast next patient called
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('next-patient-called', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'next-patient-called', {
       patientName: nextPatient.patientName,
-      tokenNumber: nextPatient.tokenNumber
+      tokenNumber: nextPatient.tokenNumber,
+      doctorCode: docCode
     });
 
-    res.json({ message: `Called Patient: ${nextPatient.patientName}`, nextPatient });
+    res.json({ message: `Calling Patient: ${nextPatient.patientName}`, nextPatient });
   } catch (error) {
     res.status(500).json({ message: 'Error calling next patient', error: error.message });
   }
 };
 
-// Manually complete a specific patient
-const completePatient = async (req, res) => {
+// Confirm patient has arrived at doctor's room
+const arrivedPatient = async (req, res) => {
   try {
-    const { id } = req.params;
-    const patient = await Patient.findById(id);
-
-    if (!patient) {
-      return res.status(404).json({ message: 'Patient not found.' });
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
-    if (patient.status === 'completed') {
-      return res.status(400).json({ message: 'Patient is already completed.' });
+    const { id } = req.params;
+    const patient = await Patient.findOne({ _id: id, sessionId });
+
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found in this session.' });
+    }
+
+    if (patient.status !== 'calling') {
+      return res.status(400).json({ message: 'Patient must be in calling state to confirm arrival.' });
+    }
+
+    patient.status = 'serving';
+    await patient.save();
+
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'patient-arrived', {
+      patientName: patient.patientName,
+      tokenNumber: patient.tokenNumber,
+      doctorCode: patient.calledBy
+    });
+
+    res.json({ message: `Patient arrived: ${patient.patientName}`, patient });
+  } catch (error) {
+    res.status(500).json({ message: 'Error marking patient arrived', error: error.message });
+  }
+};
+
+// Manually complete a patient
+const completePatient = async (req, res) => {
+  try {
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
+    const { id } = req.params;
+    const patient = await Patient.findOne({ _id: id, sessionId });
+
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found in this session.' });
     }
 
     patient.status = 'completed';
     patient.completedAt = new Date();
-    // If they were never called, set calledAt to completedAt as fallback
     if (!patient.calledAt) {
       patient.calledAt = patient.completedAt;
     }
     await patient.save();
 
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('patient-completed', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'patient-completed', {
       patientName: patient.patientName,
       tokenNumber: patient.tokenNumber
     });
@@ -149,21 +369,26 @@ const completePatient = async (req, res) => {
   }
 };
 
-// Skip a patient (moves them from active waiting list to skipped state)
+// Skip a patient
 const skipPatient = async (req, res) => {
   try {
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
     const { id } = req.params;
-    const patient = await Patient.findById(id);
+    const patient = await Patient.findOne({ _id: id, sessionId });
 
     if (!patient) {
-      return res.status(404).json({ message: 'Patient not found.' });
+      return res.status(404).json({ message: 'Patient not found in this session.' });
     }
 
     patient.status = 'skipped';
     await patient.save();
 
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('patient-skipped', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'patient-skipped', {
       patientName: patient.patientName,
       tokenNumber: patient.tokenNumber
     });
@@ -174,27 +399,29 @@ const skipPatient = async (req, res) => {
   }
 };
 
-// Restore a skipped patient back to waiting status
+// Restore a skipped patient
 const restorePatient = async (req, res) => {
   try {
-    const { id } = req.params;
-    const patient = await Patient.findById(id);
-
-    if (!patient) {
-      return res.status(404).json({ message: 'Patient not found.' });
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
-    if (patient.status !== 'skipped') {
-      return res.status(400).json({ message: 'Patient is not in skipped state.' });
+    const { id } = req.params;
+    const patient = await Patient.findOne({ _id: id, sessionId });
+
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found in this session.' });
     }
 
     patient.status = 'waiting';
+    patient.calledBy = undefined;
     patient.calledAt = undefined;
     patient.completedAt = undefined;
     await patient.save();
 
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('patient-restored', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'patient-restored', {
       patientName: patient.patientName,
       tokenNumber: patient.tokenNumber
     });
@@ -205,9 +432,14 @@ const restorePatient = async (req, res) => {
   }
 };
 
-// Update global queue settings (specifically the average consultation time)
+// Update global session settings (consultation duration)
 const updateSettings = async (req, res) => {
   try {
+    const sessionId = req.headers['x-session-id'];
+    if (!sessionId) {
+      return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
     const { averageConsultationTime } = req.body;
 
     const time = parseInt(averageConsultationTime, 10);
@@ -215,16 +447,16 @@ const updateSettings = async (req, res) => {
       return res.status(400).json({ message: 'Average consultation time must be a number greater than 0.' });
     }
 
-    let settings = await QueueSettings.findOne();
+    let settings = await QueueSettings.findOne({ sessionId });
     if (!settings) {
-      settings = new QueueSettings({ averageConsultationTime: time });
-    } else {
-      settings.averageConsultationTime = time;
+      return res.status(404).json({ message: 'Session settings not found.' });
     }
+    
+    settings.averageConsultationTime = time;
     await settings.save();
 
-    await recalculateWaitTimes();
-    await broadcastQueueUpdate('consultation-time-changed', {
+    await recalculateWaitTimes(sessionId);
+    await broadcastQueueUpdate(sessionId, 'consultation-time-changed', {
       averageConsultationTime: settings.averageConsultationTime
     });
 
@@ -235,9 +467,13 @@ const updateSettings = async (req, res) => {
 };
 
 module.exports = {
+  validateSession,
   getQueueData,
+  initializeSession,
+  resetSession,
   addPatient,
-  callNextPatient,
+  callNextPatientDoctor,
+  arrivedPatient,
   completePatient,
   skipPatient,
   restorePatient,

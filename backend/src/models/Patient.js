@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 
 const PatientSchema = new mongoose.Schema({
+  sessionId: {
+    type: String,
+    required: true
+  },
   tokenNumber: {
     type: Number,
     required: true
@@ -10,10 +14,17 @@ const PatientSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  assignedDoctors: {
+    type: [String],
+    default: ['all']
+  },
   status: {
     type: String,
-    enum: ['waiting', 'serving', 'completed', 'skipped'],
+    enum: ['waiting', 'calling', 'serving', 'completed', 'skipped'],
     default: 'waiting'
+  },
+  calledBy: {
+    type: String
   },
   estimatedWaitTime: {
     type: Number,

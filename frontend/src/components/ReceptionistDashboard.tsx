@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useQueue } from '../context/QueueContext';
+import type { Patient } from '../context/QueueContext';
 import { StatusBadge } from './StatusBadge';
 import { 
   UserPlus, 
@@ -13,7 +14,9 @@ import {
   UserCheck, 
   ChevronRight, 
   Activity,
-  Sliders
+  Sliders,
+  RefreshCw,
+  LogOut
 } from 'lucide-react';
 
 export const ReceptionistDashboard: React.FC = () => {
@@ -27,15 +30,22 @@ export const ReceptionistDashboard: React.FC = () => {
     completePatient,
     skipPatient,
     restorePatient,
-    updateSettings
+    updateSettings,
+    resetSession,
+    leaveSession
   } = useQueue();
 
   // Component states
   const [patientName, setPatientName] = useState('');
+  const [manualToken, setManualToken] = useState('');
   const [consultationTime, setConsultationTime] = useState(settings.averageConsultationTime.toString());
   const [searchTerm, setSearchTerm] = useState('');
   const [isAddingPatient, setIsAddingPatient] = useState(false);
   const [isEditingSettings, setIsEditingSettings] = useState(false);
+  
+  // Doctor assignment selection states
+  const [assignAll, setAssignAll] = useState(true);
+  const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
 
   // Filter queue based on search term
   const filteredActiveQueue = activeQueue.filter((p) => {
@@ -61,12 +71,24 @@ export const ReceptionistDashboard: React.FC = () => {
     e.preventDefault();
     if (!patientName.trim()) return;
 
+    // Validate if selective assignment is chosen but no doctor checked
+    if (!assignAll && selectedDocs.length === 0) {
+      alert('Please check at least one doctor or select "Assign to All Doctors".');
+      return;
+    }
+
     setIsAddingPatient(true);
-    const success = await addPatient(patientName);
+    const assigned = assignAll ? ['all'] : selectedDocs;
+    const tokenVal = manualToken.trim() ? parseInt(manualToken, 10) : undefined;
+    
+    const success = await addPatient(patientName, assigned, tokenVal);
     setIsAddingPatient(false);
     
     if (success) {
       setPatientName('');
+      setManualToken('');
+      setSelectedDocs([]);
+      setAssignAll(true);
     }
   };
 
@@ -80,6 +102,20 @@ export const ReceptionistDashboard: React.FC = () => {
     setIsEditingSettings(false);
   };
 
+  const handleReset = async () => {
+    if (window.confirm('WARNING: Wiping the session will delete all doctors and clear today\'s patient tokens. Proceed?')) {
+      await resetSession();
+    }
+  };
+
+  const handleDocCheckboxChange = (code: string) => {
+    if (selectedDocs.includes(code)) {
+      setSelectedDocs(selectedDocs.filter(c => c !== code));
+    } else {
+      setSelectedDocs([...selectedDocs, code]);
+    }
+  };
+
   const formatTime = (dateStr: string) => {
     try {
       const date = new Date(dateStr);
@@ -89,8 +125,30 @@ export const ReceptionistDashboard: React.FC = () => {
     }
   };
 
+  const renderAssignedDoctors = (patient: Patient) => {
+    if (patient.assignedDoctors.includes('all')) {
+      return (
+        <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded-md text-[10px] font-bold uppercase">
+          All Doctors
+        </span>
+      );
+    }
+    return (
+      <div className="flex gap-1 flex-wrap">
+        {patient.assignedDoctors.map(code => (
+          <span 
+            key={code} 
+            className="px-2 py-0.5 bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 rounded-md text-[10px] font-extrabold uppercase"
+          >
+            {code}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
   // Derived statistics
-  const currentServing = activeQueue.find((p) => p.status === 'serving');
+  const currentServingCount = activeQueue.filter((p) => p.status === 'serving').length;
   const waitingCount = activeQueue.filter((p) => p.status === 'waiting').length;
 
   return (
@@ -98,53 +156,49 @@ export const ReceptionistDashboard: React.FC = () => {
       {/* Analytics Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Card 1: Waiting */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-xs flex items-center space-x-4">
-          <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
+        <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs flex items-center space-x-4 transition-colors duration-300">
+          <div className="p-3 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-xl">
             <Users className="h-6 w-6" />
           </div>
           <div>
-            <p className="text-sm font-medium text-slate-500">Patients Waiting</p>
-            <h3 className="text-2xl font-bold text-slate-800">{waitingCount}</h3>
+            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Patients Waiting</p>
+            <h3 className="text-2xl font-bold text-slate-800 dark:text-slate-100">{waitingCount}</h3>
           </div>
         </div>
 
         {/* Card 2: Served */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-xs flex items-center space-x-4">
-          <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+        <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs flex items-center space-x-4 transition-colors duration-300">
+          <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-450 rounded-xl">
             <UserCheck className="h-6 w-6" />
           </div>
           <div>
-            <p className="text-sm font-medium text-slate-500">Served Today</p>
-            <h3 className="text-2xl font-bold text-slate-800">{analytics.patientsServed}</h3>
+            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Served Today</p>
+            <h3 className="text-2xl font-bold text-slate-800 dark:text-slate-100">{analytics.patientsServed}</h3>
           </div>
         </div>
 
         {/* Card 3: Avg Wait Time */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-xs flex items-center space-x-4">
-          <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl">
+        <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs flex items-center space-x-4 transition-colors duration-300">
+          <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 rounded-xl">
             <Clock className="h-6 w-6" />
           </div>
           <div>
-            <p className="text-sm font-medium text-slate-500">Avg Wait Time</p>
-            <h3 className="text-2xl font-bold text-slate-800">
-              {analytics.averageWaitTime} <span className="text-sm font-normal text-slate-400">mins</span>
+            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Avg Wait Time</p>
+            <h3 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+              {analytics.averageWaitTime} <span className="text-sm font-normal text-slate-400 dark:text-slate-500">mins</span>
             </h3>
           </div>
         </div>
 
-        {/* Card 4: Current Status */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-xs flex items-center space-x-4">
-          <div className="p-3 bg-rose-50 text-rose-600 rounded-xl">
+        {/* Card 4: Active Serving Doctors count */}
+        <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs flex items-center space-x-4 transition-colors duration-300">
+          <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 rounded-xl">
             <Activity className="h-6 w-6" />
           </div>
           <div>
-            <p className="text-sm font-medium text-slate-500">Doctor Room</p>
-            <h3 className="text-md font-bold text-slate-800 truncate max-w-[170px]">
-              {currentServing ? (
-                <span className="text-emerald-600">Serving #{currentServing.tokenNumber}</span>
-              ) : (
-                <span className="text-slate-400">Available</span>
-              )}
+            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Active consultations</p>
+            <h3 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+              {currentServingCount} <span className="text-sm font-normal text-slate-400 dark:text-slate-500">serving</span>
             </h3>
           </div>
         </div>
@@ -155,69 +209,40 @@ export const ReceptionistDashboard: React.FC = () => {
         {/* Left Column: Receptionist Actions */}
         <div className="space-y-6">
           {/* Action Card: Call Next */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-xs">
-            <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center">
-              <Activity className="h-5 w-5 mr-2 text-blue-500" />
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs transition-colors duration-300">
+            <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
+              <Activity className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
               Queue Control
             </h3>
             
             <div className="space-y-4">
-              {currentServing ? (
-                <div className="bg-emerald-50/50 p-4 rounded-xl border border-emerald-100">
-                  <p className="text-xs font-semibold text-emerald-800 uppercase tracking-wider">Now Serving</p>
-                  <p className="text-lg font-bold text-slate-800 mt-1">
-                    Token #{currentServing.tokenNumber}: {currentServing.patientName}
-                  </p>
-                  <div className="flex space-x-2 mt-3">
-                    <button
-                      onClick={() => completePatient(currentServing._id)}
-                      className="flex-1 inline-flex justify-center items-center px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-sm font-semibold transition shadow-xs cursor-pointer"
-                    >
-                      <Check className="h-4 w-4 mr-1.5" />
-                      Complete
-                    </button>
-                    <button
-                      onClick={() => skipPatient(currentServing._id)}
-                      className="flex-1 inline-flex justify-center items-center px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-semibold transition shadow-xs cursor-pointer"
-                    >
-                      <Slash className="h-4 w-4 mr-1.5" />
-                      Skip
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200/60 text-center py-6">
-                  <p className="text-sm font-medium text-slate-500">Doctor is currently available</p>
-                </div>
-              )}
-
               <button
                 onClick={callNextPatient}
                 disabled={waitingCount === 0}
                 className={`w-full inline-flex justify-center items-center py-3 rounded-xl text-md font-semibold transition shadow-sm cursor-pointer ${
                   waitingCount === 0
-                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                    : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed border border-slate-200 dark:border-slate-800'
+                    : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 text-white'
                 }`}
               >
                 <Play className="h-5 w-5 mr-2" />
                 Call Next Patient
               </button>
               {waitingCount === 0 && (
-                <p className="text-xs text-slate-400 text-center">Waiting list is currently empty</p>
+                <p className="text-xs text-slate-400 dark:text-slate-500 text-center">Waiting list is currently empty</p>
               )}
             </div>
           </div>
 
           {/* Action Card: Add Patient */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-xs">
-            <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center">
-              <UserPlus className="h-5 w-5 mr-2 text-blue-500" />
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs transition-colors duration-300">
+            <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
+              <UserPlus className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
               Add Patient
             </h3>
             <form onSubmit={handleAddPatientSubmit} className="space-y-4">
               <div>
-                <label htmlFor="patient-name" className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="patient-name" className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
                   Patient Full Name
                 </label>
                 <input
@@ -226,14 +251,72 @@ export const ReceptionistDashboard: React.FC = () => {
                   placeholder="e.g. Margaret Carter"
                   value={patientName}
                   onChange={(e) => setPatientName(e.target.value)}
-                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                  className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
                   required
                 />
               </div>
+
+              {/* Optional Manual Token Input */}
+              <div>
+                <label htmlFor="manual-token" className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                  Manual Token Number (Optional)
+                </label>
+                <input
+                  id="manual-token"
+                  type="number"
+                  placeholder="Leave blank for automatic assignment"
+                  value={manualToken}
+                  onChange={(e) => setManualToken(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                  min="1"
+                />
+              </div>
+
+              {/* Doctor Assignment Selection */}
+              <div>
+                <span className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
+                  Doctor Assignment
+                </span>
+                
+                <div className="space-y-2.5 p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200/60 dark:border-slate-800 rounded-xl max-h-[160px] overflow-y-auto">
+                  <label className="flex items-center space-x-2 text-sm font-semibold text-slate-700 dark:text-slate-300 cursor-pointer hover:text-slate-900 dark:hover:text-white transition">
+                    <input
+                      type="checkbox"
+                      checked={assignAll}
+                      onChange={(e) => {
+                        setAssignAll(e.target.checked);
+                        if (e.target.checked) setSelectedDocs([]);
+                      }}
+                      className="rounded border-slate-300 dark:border-slate-800 text-blue-600 focus:ring-blue-500 h-4 w-4"
+                    />
+                    <span>Assign to All Doctors</span>
+                  </label>
+
+                  {/* Individual registered doctors list */}
+                  {settings.doctors.map((doc) => (
+                    <label 
+                      key={doc.code} 
+                      className={`flex items-center space-x-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer transition ${
+                        assignAll ? 'opacity-40 cursor-not-allowed' : 'hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedDocs.includes(doc.code)}
+                        disabled={assignAll}
+                        onChange={() => handleDocCheckboxChange(doc.code)}
+                        className="rounded border-slate-300 dark:border-slate-800 text-blue-600 focus:ring-blue-500 h-4 w-4"
+                      />
+                      <span>{doc.name} [{doc.code}]</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
               <button
                 type="submit"
                 disabled={isAddingPatient || !patientName.trim()}
-                className="w-full inline-flex justify-center items-center py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold transition cursor-pointer disabled:bg-blue-400"
+                className="w-full inline-flex justify-center items-center py-2.5 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 text-white rounded-xl font-semibold transition cursor-pointer disabled:bg-blue-400 dark:disabled:bg-blue-800/50"
               >
                 {isAddingPatient ? 'Adding...' : 'Generate Token'}
                 <ChevronRight className="h-4 w-4 ml-1" />
@@ -242,14 +325,15 @@ export const ReceptionistDashboard: React.FC = () => {
           </div>
 
           {/* Action Card: Settings */}
-          <div className="bg-white p-6 rounded-2xl border border-slate-100 shadow-xs">
-            <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center">
-              <Sliders className="h-5 w-5 mr-2 text-blue-500" />
-              Consultation Settings
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs transition-colors duration-300">
+            <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
+              <Sliders className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
+              Session Settings
             </h3>
-            <form onSubmit={handleSettingsSubmit} className="space-y-4">
+            
+            <form onSubmit={handleSettingsSubmit} className="space-y-4 border-b border-slate-100 dark:border-slate-800/80 pb-4 mb-4">
               <div>
-                <label htmlFor="consultation-duration" className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                <label htmlFor="consultation-duration" className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
                   Avg Duration (Minutes)
                 </label>
                 <div className="flex space-x-2">
@@ -259,30 +343,50 @@ export const ReceptionistDashboard: React.FC = () => {
                     min="1"
                     value={consultationTime}
                     onChange={(e) => setConsultationTime(e.target.value)}
-                    className="flex-grow px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                    className="flex-grow px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
                     required
                   />
                   <button
                     type="submit"
                     disabled={isEditingSettings || parseInt(consultationTime) === settings.averageConsultationTime}
-                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white rounded-xl font-semibold transition cursor-pointer"
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 dark:bg-slate-800 dark:hover:bg-slate-750 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white rounded-xl font-semibold transition cursor-pointer shrink-0"
                   >
                     Save
                   </button>
                 </div>
               </div>
             </form>
+
+            <div className="space-y-2">
+              {/* Reset Session Button */}
+              <button
+                onClick={handleReset}
+                className="w-full inline-flex justify-center items-center py-2.5 border border-rose-200 dark:border-rose-900/50 hover:bg-rose-50 dark:hover:bg-rose-950/20 text-rose-605 dark:text-rose-400 rounded-xl font-bold text-xs transition cursor-pointer"
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-2" />
+                Reset & Wipe Active Session
+              </button>
+
+              {/* Leave Session Button */}
+              <button
+                onClick={leaveSession}
+                className="w-full inline-flex justify-center items-center py-2.5 border border-slate-200 dark:border-slate-850 hover:bg-slate-50 dark:hover:bg-slate-950/30 text-slate-600 dark:text-slate-400 rounded-xl font-bold text-xs transition cursor-pointer"
+              >
+                <LogOut className="h-3.5 w-3.5 mr-2" />
+                Disconnect Session Dashboard
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Right Column (2 spans wide): Queue View */}
         <div className="lg:col-span-2 space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-xs overflow-hidden">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs overflow-hidden transition-colors duration-300">
             {/* Header with Search */}
-            <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-800/80 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <h3 className="text-lg font-bold text-slate-800">Active Patient Queue</h3>
-                <p className="text-xs text-slate-400 mt-0.5">Currently serving or waiting patients</p>
+                <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Active Patient Queue</h3>
+                <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Currently serving or waiting patients</p>
               </div>
               <div className="relative">
                 <Search className="absolute left-3 top-3 h-4.5 w-4.5 text-slate-400" />
@@ -291,7 +395,7 @@ export const ReceptionistDashboard: React.FC = () => {
                   placeholder="Search token or name..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className="pl-9 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition w-full sm:w-64"
+                  className="pl-9 pr-4 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition w-full sm:w-64 text-slate-800 dark:text-slate-100"
                 />
               </div>
             </div>
@@ -300,86 +404,97 @@ export const ReceptionistDashboard: React.FC = () => {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="bg-slate-50 text-slate-500 text-xs font-semibold uppercase tracking-wider border-b border-slate-100">
+                  <tr className="bg-slate-50 dark:bg-slate-950/60 text-slate-500 dark:text-slate-400 text-xs font-semibold uppercase tracking-wider border-b border-slate-100 dark:border-slate-800/80">
                     <th className="py-3.5 px-6">Token</th>
                     <th className="py-3.5 px-6">Patient Name</th>
                     <th className="py-3.5 px-6">Status</th>
+                    <th className="py-3.5 px-6">Doctor Assigned</th>
                     <th className="py-3.5 px-6 text-center">Wait Time</th>
                     <th className="py-3.5 px-6">Time Added</th>
                     <th className="py-3.5 px-6 text-right">Actions</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 text-sm">
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80 text-sm">
                   {filteredActiveQueue.length > 0 ? (
                     filteredActiveQueue.map((patient) => (
                       <tr 
                         key={patient._id} 
-                        className={`hover:bg-slate-50/50 transition ${
-                          patient.status === 'serving' ? 'bg-emerald-50/20' : ''
+                        className={`hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition ${
+                          patient.status === 'serving' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : ''
                         }`}
                       >
-                        <td className="py-4 px-6 font-bold text-blue-600">
+                        <td className="py-4 px-6 font-bold text-blue-600 dark:text-blue-400">
                           #{patient.tokenNumber}
                         </td>
-                        <td className="py-4 px-6 font-semibold text-slate-700">
+                        <td className="py-4 px-6 font-semibold text-slate-700 dark:text-slate-200">
                           {patient.patientName}
+                          {patient.status === 'calling' && patient.calledBy && (
+                            <span className="text-[10px] font-bold ml-1.5 px-1.5 py-0.5 bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 rounded-md">
+                              Called by {patient.calledBy}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 px-6">
                           <StatusBadge status={patient.status} />
                         </td>
+                        <td className="py-4 px-6">
+                          {renderAssignedDoctors(patient)}
+                        </td>
                         <td className="py-4 px-6 text-center font-medium">
-                          {patient.status === 'serving' ? (
-                            <span className="text-emerald-600 font-bold">-</span>
+                          {patient.status === 'serving' || patient.status === 'calling' ? (
+                            <span className="text-emerald-600 dark:text-emerald-400 font-bold">-</span>
                           ) : (
-                            <span className="text-slate-600">{patient.estimatedWaitTime} mins</span>
+                            <span className="text-slate-600 dark:text-slate-300">{patient.estimatedWaitTime} mins</span>
                           )}
                         </td>
-                        <td className="py-4 px-6 text-slate-400">
+                        <td className="py-4 px-6 text-slate-400 dark:text-slate-500">
                           {formatTime(patient.createdAt)}
                         </td>
-                        <td className="py-4 px-6 text-right space-x-1.5">
-                          {patient.status === 'waiting' && (
-                            <>
-                              <button
-                                onClick={() => completePatient(patient._id)}
-                                className="inline-flex items-center justify-center p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-600 rounded-lg transition cursor-pointer"
-                                title="Complete Consultation"
-                              >
-                                <Check className="h-4 w-4" />
-                              </button>
-                              <button
-                                onClick={() => skipPatient(patient._id)}
-                                className="inline-flex items-center justify-center p-1.5 bg-amber-50 hover:bg-amber-100 text-amber-600 rounded-lg transition cursor-pointer"
-                                title="Skip Patient"
-                              >
-                                <Slash className="h-4 w-4" />
-                              </button>
-                            </>
-                          )}
-                          {patient.status === 'serving' && (
-                            <>
-                              <button
-                                onClick={() => completePatient(patient._id)}
-                                className="inline-flex items-center justify-center p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition shadow-xs cursor-pointer"
-                                title="Complete"
-                              >
-                                <Check className="h-4 w-4" />
-                              </button>
-                              <button
-                                onClick={() => skipPatient(patient._id)}
-                                className="inline-flex items-center justify-center p-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition shadow-xs cursor-pointer"
-                                title="Skip"
-                              >
-                                <Slash className="h-4 w-4" />
-                              </button>
-                            </>
-                          )}
+                        <td className="py-4 px-6 text-right">
+                          <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                            {patient.status === 'waiting' && (
+                              <>
+                                <button
+                                  onClick={() => completePatient(patient._id)}
+                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 rounded-lg transition cursor-pointer"
+                                  title="Complete Consultation"
+                                >
+                                  <Check className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => skipPatient(patient._id)}
+                                  className="inline-flex items-center justify-center p-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 rounded-lg transition cursor-pointer"
+                                  title="Skip Patient"
+                                >
+                                  <Slash className="h-4 w-4" />
+                                </button>
+                              </>
+                            )}
+                            {(patient.status === 'serving' || patient.status === 'calling') && (
+                              <>
+                                <button
+                                  onClick={() => completePatient(patient._id)}
+                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-550 text-white rounded-lg transition shadow-xs cursor-pointer"
+                                  title="Complete"
+                                >
+                                  <Check className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => skipPatient(patient._id)}
+                                  className="inline-flex items-center justify-center p-1.5 bg-amber-500 hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-550 text-white rounded-lg transition shadow-xs cursor-pointer"
+                                  title="Skip"
+                                >
+                                  <Slash className="h-4 w-4" />
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={6} className="py-12 text-center text-slate-400">
+                      <td colSpan={7} className="py-12 text-center text-slate-400 dark:text-slate-500">
                         {searchTerm ? 'No patients match your search filter' : 'No patients in active queue'}
                       </td>
                     </tr>
@@ -390,43 +505,47 @@ export const ReceptionistDashboard: React.FC = () => {
           </div>
 
           {/* Skipped Patients Shelf */}
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-xs overflow-hidden">
-            <div className="p-6 border-b border-slate-100">
-              <h3 className="text-lg font-bold text-slate-800">Skipped Patients</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Skipped patients who can be restored back to queue</p>
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs overflow-hidden transition-colors duration-300">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-800/80">
+              <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Skipped Patients</h3>
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Skipped patients who can be restored back to queue</p>
             </div>
             
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="bg-slate-50 text-slate-500 text-xs font-semibold uppercase tracking-wider border-b border-slate-100">
+                  <tr className="bg-slate-50 dark:bg-slate-950/60 text-slate-500 dark:text-slate-400 text-xs font-semibold uppercase tracking-wider border-b border-slate-100 dark:border-slate-800/80">
                     <th className="py-3.5 px-6">Token</th>
                     <th className="py-3.5 px-6">Patient Name</th>
                     <th className="py-3.5 px-6">Status</th>
+                    <th className="py-3.5 px-6">Doctor Assigned</th>
                     <th className="py-3.5 px-6">Time Added</th>
                     <th className="py-3.5 px-6 text-right">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 text-sm">
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80 text-sm">
                   {filteredSkippedQueue.length > 0 ? (
                     filteredSkippedQueue.map((patient) => (
-                      <tr key={patient._id} className="hover:bg-slate-50/50 transition">
-                        <td className="py-4 px-6 font-bold text-slate-500">
+                      <tr key={patient._id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition">
+                        <td className="py-4 px-6 font-bold text-slate-550 dark:text-slate-400">
                           #{patient.tokenNumber}
                         </td>
-                        <td className="py-4 px-6 font-semibold text-slate-700">
+                        <td className="py-4 px-6 font-semibold text-slate-700 dark:text-slate-200">
                           {patient.patientName}
                         </td>
                         <td className="py-4 px-6">
                           <StatusBadge status="skipped" />
                         </td>
-                        <td className="py-4 px-6 text-slate-400">
+                        <td className="py-4 px-6">
+                          {renderAssignedDoctors(patient)}
+                        </td>
+                        <td className="py-4 px-6 text-slate-400 dark:text-slate-500">
                           {formatTime(patient.createdAt)}
                         </td>
                         <td className="py-4 px-6 text-right">
                           <button
                             onClick={() => restorePatient(patient._id)}
-                            className="inline-flex items-center px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg text-xs font-bold transition cursor-pointer"
+                            className="inline-flex items-center px-3 py-1.5 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-605 dark:text-blue-400 rounded-lg text-xs font-bold transition cursor-pointer"
                           >
                             <RotateCcw className="h-3.5 w-3.5 mr-1" />
                             Restore
@@ -436,7 +555,7 @@ export const ReceptionistDashboard: React.FC = () => {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400 text-sm">
+                      <td colSpan={6} className="py-8 text-center text-slate-400 dark:text-slate-500 text-sm">
                         No skipped patients today
                       </td>
                     </tr>
