@@ -10,11 +10,14 @@ import {
   Activity, 
   Users, 
   LogOut,
-  ClipboardList
+  ClipboardList,
+  ShieldAlert,
+  Loader2
 } from 'lucide-react';
 
 export const DoctorDashboard: React.FC = () => {
   const {
+    doctorCode: docCode,
     activeQueue,
     settings,
     analytics,
@@ -25,67 +28,59 @@ export const DoctorDashboard: React.FC = () => {
     leaveSession
   } = useQueue();
 
-  // Selected doctor code state
-  const [docCode, setDocCode] = useState<string>(() => {
-    return sessionStorage.getItem('currentDoctorCode') || '';
-  });
-
   const [activeTab, setActiveTab] = useState<'my-queue' | 'global-queue'>('my-queue');
+  
+  // Local action pending indicators
+  const [isCalling, setIsCalling] = useState(false);
+  const [isArriving, setIsArriving] = useState(false);
+  const [isCompleting, setIsCompleting] = useState(false);
+  const [isSkipping, setIsSkipping] = useState(false);
+
+  const handleCallNext = async () => {
+    if (!docCode) return;
+    setIsCalling(true);
+    await callNextDoctorPatient(docCode);
+    setIsCalling(false);
+  };
+
+  const handleArrived = async (patientId: string) => {
+    setIsArriving(true);
+    await arrivedPatient(patientId);
+    setIsArriving(false);
+  };
+
+  const handleComplete = async (patientId: string) => {
+    setIsCompleting(true);
+    await completePatient(patientId);
+    setIsCompleting(false);
+  };
+
+  const handleSkip = async (patientId: string) => {
+    setIsSkipping(true);
+    await skipPatient(patientId);
+    setIsSkipping(false);
+  };
 
   // Find currently selected doctor details
   const currentDoctor = settings.doctors.find(d => d.code === docCode);
 
-  const handleSelectDoctor = (code: string) => {
-    setDocCode(code);
-    sessionStorage.setItem('currentDoctorCode', code);
-  };
-
   const handleLogout = () => {
-    setDocCode('');
-    sessionStorage.removeItem('currentDoctorCode');
+    leaveSession();
   };
 
-  // 1. Selector view if doctor not chosen
+  // 1. Placeholder if doctor credentials not resolved
   if (!docCode || !currentDoctor) {
     return (
-      <div className="max-w-md mx-auto my-12">
-        <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-3xl p-8 shadow-xl text-center transition-colors">
-          <div className="bg-indigo-50 dark:bg-indigo-950/40 p-4 rounded-2xl inline-flex text-indigo-600 dark:text-indigo-400 mb-4">
-            <ClipboardList className="h-8 w-8" />
-          </div>
-          
-          <h2 className="text-xl font-black text-slate-800 dark:text-slate-100">Doctor Portal</h2>
-          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 mb-6">
-            Please select your doctor credentials to access your personal patient registry and calling controls.
-          </p>
-
-          {settings.doctors.length === 0 ? (
-            <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/40 rounded-xl text-xs font-semibold text-amber-700 dark:text-amber-450">
-              No doctors registered in this session. Please set up the session in the Receptionist view first.
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="text-left">
-                <label htmlFor="doctor-select" className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                  Select Your Name
-                </label>
-                <select
-                  id="doctor-select"
-                  className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm font-semibold transition"
-                  defaultValue=""
-                  onChange={(e) => e.target.value && handleSelectDoctor(e.target.value)}
-                >
-                  <option value="" disabled>-- Choose Registered Doctor --</option>
-                  {settings.doctors.map((doc) => (
-                    <option key={doc.code} value={doc.code}>
-                      {doc.name} [{doc.code}]
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
+      <div className="max-w-md mx-auto my-12 text-center p-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-xl">
+        <ShieldAlert className="h-12 w-12 text-rose-500 mx-auto mb-4 animate-bounce" />
+        <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">Doctor Profile Missing</h2>
+        <p className="text-sm text-slate-500 mt-2 mb-6">Your doctor session credentials are invalid or missing. Please disconnect and rejoin.</p>
+        <button 
+          onClick={leaveSession}
+          className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition shadow-md cursor-pointer"
+        >
+          Return to Portal
+        </button>
       </div>
     );
   }
@@ -95,7 +90,7 @@ export const DoctorDashboard: React.FC = () => {
   const myWaitingQueue = activeQueue.filter(
     (p) =>
       p.status === 'waiting' &&
-      (p.assignedDoctors.includes(docCode) || p.assignedDoctors.includes('all'))
+      (p.assignedDoctors.includes(docCode) || p.assignedDoctors.includes('ALL'))
   );
 
   // Find active patient called by this doctor
@@ -118,7 +113,7 @@ export const DoctorDashboard: React.FC = () => {
   };
 
   const renderAssignedDoctors = (patient: Patient) => {
-    if (patient.assignedDoctors.includes('all')) {
+    if (patient.assignedDoctors.includes('ALL')) {
       return (
         <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded-md text-[10px] font-bold uppercase">
           All Doctors
@@ -170,6 +165,13 @@ export const DoctorDashboard: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {settings.sessionStatus === 'lunch-break' && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-250 dark:border-amber-900/40 rounded-2xl text-sm font-semibold text-amber-800 dark:text-amber-400 flex items-center space-x-3.5 animate-pulse">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
+          <span>Lunch Break Active — Patient calling actions are temporarily frozen. Enjoy your break!</span>
+        </div>
+      )}
 
       {/* Overview Analytics Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -237,18 +239,28 @@ export const DoctorDashboard: React.FC = () => {
 
                   <div className="flex flex-col gap-2">
                     <button
-                      onClick={() => arrivedPatient(currentCalling._id)}
-                      className="w-full inline-flex justify-center items-center py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition shadow-xs cursor-pointer"
+                      onClick={() => handleArrived(currentCalling._id)}
+                      disabled={isArriving || isSkipping || settings.sessionStatus === 'lunch-break'}
+                      className="w-full inline-flex justify-center items-center py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-500/50 text-white rounded-xl text-sm font-bold transition shadow-xs cursor-pointer"
                     >
-                      <Check className="h-4.5 w-4.5 mr-1.5" />
-                      Arrived (Start Consultation)
+                      {isArriving ? (
+                        <Loader2 className="h-4.5 w-4.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Check className="h-4.5 w-4.5 mr-1.5" />
+                      )}
+                      {isArriving ? 'Starting Consultation...' : 'Arrived (Start Consultation)'}
                     </button>
                     <button
-                      onClick={() => skipPatient(currentCalling._id)}
-                      className="w-full inline-flex justify-center items-center py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-sm font-semibold transition cursor-pointer"
+                      onClick={() => handleSkip(currentCalling._id)}
+                      disabled={isArriving || isSkipping || settings.sessionStatus === 'lunch-break'}
+                      className="w-full inline-flex justify-center items-center py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-amber-550/50 text-white rounded-xl text-sm font-semibold transition cursor-pointer"
                     >
-                      <Slash className="h-4 w-4 mr-1.5" />
-                      No-Show (Skip Patient)
+                      {isSkipping ? (
+                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                      ) : (
+                        <Slash className="h-4 w-4 mr-1.5" />
+                      )}
+                      {isSkipping ? 'Skipping...' : 'No-Show (Skip Patient)'}
                     </button>
                   </div>
                 </div>
@@ -272,18 +284,28 @@ export const DoctorDashboard: React.FC = () => {
 
                   <div className="flex flex-col gap-2">
                     <button
-                      onClick={() => completePatient(currentServing._id)}
-                      className="w-full inline-flex justify-center items-center py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition shadow-xs cursor-pointer"
+                      onClick={() => handleComplete(currentServing._id)}
+                      disabled={isCompleting || isSkipping || settings.sessionStatus === 'lunch-break'}
+                      className="w-full inline-flex justify-center items-center py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-500/50 text-white rounded-xl text-sm font-bold transition shadow-xs cursor-pointer"
                     >
-                      <Check className="h-4.5 w-4.5 mr-1.5" />
-                      Complete Consultation
+                      {isCompleting ? (
+                        <Loader2 className="h-4.5 w-4.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Check className="h-4.5 w-4.5 mr-1.5" />
+                      )}
+                      {isCompleting ? 'Completing...' : 'Complete Consultation'}
                     </button>
                     <button
-                      onClick={() => skipPatient(currentServing._id)}
-                      className="w-full inline-flex justify-center items-center py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-sm font-semibold transition cursor-pointer"
+                      onClick={() => handleSkip(currentServing._id)}
+                      disabled={isCompleting || isSkipping || settings.sessionStatus === 'lunch-break'}
+                      className="w-full inline-flex justify-center items-center py-2 bg-amber-500 hover:bg-amber-600 disabled:bg-amber-550/50 text-white rounded-xl text-sm font-semibold transition cursor-pointer"
                     >
-                      <Slash className="h-4 w-4 mr-1.5" />
-                      Skip Patient
+                      {isSkipping ? (
+                        <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                      ) : (
+                        <Slash className="h-4 w-4 mr-1.5" />
+                      )}
+                      {isSkipping ? 'Skipping...' : 'Skip Patient'}
                     </button>
                   </div>
                 </div>
@@ -299,16 +321,24 @@ export const DoctorDashboard: React.FC = () => {
                   </div>
 
                   <button
-                    onClick={() => callNextDoctorPatient(docCode)}
-                    disabled={myWaitingQueue.length === 0}
+                    onClick={handleCallNext}
+                    disabled={myWaitingQueue.length === 0 || isCalling || settings.sessionStatus === 'lunch-break'}
                     className={`w-full inline-flex justify-center items-center py-3.5 rounded-xl font-bold transition shadow-sm text-sm cursor-pointer ${
-                      myWaitingQueue.length === 0
+                      myWaitingQueue.length === 0 || isCalling || settings.sessionStatus === 'lunch-break'
                         ? 'bg-slate-100 dark:bg-slate-800 text-slate-405 dark:text-slate-600 border border-slate-200 dark:border-slate-800 cursor-not-allowed'
                         : 'bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-500/10'
                     }`}
                   >
-                    <Play className="h-4.5 w-4.5 mr-2" />
-                    Call Next Patient
+                    {isCalling ? (
+                      <Loader2 className="h-4.5 w-4.5 mr-2 animate-spin" />
+                    ) : (
+                      <Play className="h-4.5 w-4.5 mr-2" />
+                    )}
+                    {settings.sessionStatus === 'lunch-break'
+                      ? 'Queue Frozen (Lunch Break)'
+                      : isCalling
+                        ? 'Calling Next Patient...'
+                        : 'Call Next Patient'}
                   </button>
                 </div>
               )}
@@ -322,7 +352,7 @@ export const DoctorDashboard: React.FC = () => {
             {/* Header Tabs */}
             <div className="p-6 border-b border-slate-100 dark:border-slate-800/80 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <h3 className="text-md font-bold text-slate-805 dark:text-slate-100">Patients Registry</h3>
+                <h3 className="text-md font-bold text-slate-800 dark:text-slate-100">Patients Registry</h3>
                 <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Filter patients list based on assignment</p>
               </div>
 

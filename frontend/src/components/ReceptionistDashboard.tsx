@@ -1,22 +1,25 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQueue } from '../context/QueueContext';
-import type { Patient } from '../context/QueueContext';
+import type { Patient, Doctor } from '../context/QueueContext';
 import { StatusBadge } from './StatusBadge';
-import { 
-  UserPlus, 
-  Play, 
-  Check, 
-  Slash, 
-  Clock, 
-  Search, 
-  RotateCcw, 
-  Users, 
-  UserCheck, 
-  ChevronRight, 
+import {
+  UserPlus,
+  Play,
+  Check,
+  Slash,
+  Clock,
+  Search,
+  RotateCcw,
+  Users,
+  UserCheck,
+  ChevronRight,
   Activity,
   Sliders,
   RefreshCw,
-  LogOut
+  LogOut,
+  Loader2,
+  Phone,
+  MessageSquare
 } from 'lucide-react';
 
 export const ReceptionistDashboard: React.FC = () => {
@@ -26,7 +29,7 @@ export const ReceptionistDashboard: React.FC = () => {
     settings,
     analytics,
     addPatient,
-    callNextPatient,
+    callNextDoctorPatient,
     completePatient,
     skipPatient,
     restorePatient,
@@ -42,10 +45,38 @@ export const ReceptionistDashboard: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isAddingPatient, setIsAddingPatient] = useState(false);
   const [isEditingSettings, setIsEditingSettings] = useState(false);
-  
+  const [isResetting, setIsResetting] = useState(false);
+  const [isCallingNext, setIsCallingNext] = useState(false);
+  const [processingPatientId, setProcessingPatientId] = useState<string | null>(null);
+
   // Doctor assignment selection states
   const [assignAll, setAssignAll] = useState(true);
   const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
+
+  // Calling system state
+  const [selectedCallingDocCode, setSelectedCallingDocCode] = useState<string>(
+    settings.doctors[0]?.code || ''
+  );
+
+  // Settings statuses
+  const [sessionStatus, setSessionStatus] = useState<'open' | 'lunch-break' | 'closed'>(
+    settings.sessionStatus || 'open'
+  );
+  const [tempDoctors, setTempDoctors] = useState<Doctor[]>(settings.doctors);
+  const [mostMsg, setMostMsg] = useState(settings.mostSignificantMessage || '');
+  const [leastMsg, setLeastMsg] = useState(settings.leastSignificantMessage || '');
+
+  // Sync settings when they update from socket
+  useEffect(() => {
+    setConsultationTime(settings.averageConsultationTime.toString());
+    setSessionStatus(settings.sessionStatus || 'open');
+    setTempDoctors(settings.doctors);
+    setMostMsg(settings.mostSignificantMessage || '');
+    setLeastMsg(settings.leastSignificantMessage || '');
+    if (settings.doctors.length > 0 && !selectedCallingDocCode) {
+      setSelectedCallingDocCode(settings.doctors[0].code);
+    }
+  }, [settings]);
 
   // Filter queue based on search term
   const filteredActiveQueue = activeQueue.filter((p) => {
@@ -66,24 +97,73 @@ export const ReceptionistDashboard: React.FC = () => {
     );
   });
 
-  // Action handlers
+  // Calling system: call next for selected doctor
+  const handleCallNextForDoctor = async (docCode: string) => {
+    if (!docCode) return;
+    const doc = settings.doctors.find(d => d.code === docCode);
+    if (!doc) return;
+    if (doc.availability === 'lunch-break' || doc.availability === 'not-available') {
+      alert(`Doctor ${doc.name} is currently ${doc.availability === 'lunch-break' ? 'on a lunch break' : 'not available'}. Change their status to "Available" first.`);
+      return;
+    }
+    const callingForDoc = activeQueue.find(p => p.calledBy === docCode && p.status === 'calling');
+    const servingForDoc = activeQueue.find(p => p.calledBy === docCode && p.status === 'serving');
+    if (callingForDoc) {
+      alert(`Dr. ${doc.name} is already calling Token #${callingForDoc.tokenNumber}. Wait for that patient to arrive or skip them first.`);
+      return;
+    }
+    if (servingForDoc) {
+      alert(`Dr. ${doc.name} is currently serving Token #${servingForDoc.tokenNumber}. Complete that consultation first.`);
+      return;
+    }
+    setIsCallingNext(true);
+    await callNextDoctorPatient(docCode);
+    setIsCallingNext(false);
+  };
+
+  // Queue action handlers
+  const handleCompletePatient = async (id: string) => {
+    setProcessingPatientId(id);
+    await completePatient(id);
+    setProcessingPatientId(null);
+  };
+
+  const handleSkipPatient = async (id: string) => {
+    setProcessingPatientId(id);
+    await skipPatient(id);
+    setProcessingPatientId(null);
+  };
+
+  const handleRestorePatient = async (id: string) => {
+    setProcessingPatientId(id);
+    await restorePatient(id);
+    setProcessingPatientId(null);
+  };
+
+  const handleReset = async () => {
+    if (window.confirm("WARNING: Wiping the session will delete all doctors and clear today's patient tokens. Proceed?")) {
+      setIsResetting(true);
+      await resetSession();
+      setIsResetting(false);
+    }
+  };
+
   const handleAddPatientSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!patientName.trim()) return;
 
-    // Validate if selective assignment is chosen but no doctor checked
     if (!assignAll && selectedDocs.length === 0) {
       alert('Please check at least one doctor or select "Assign to All Doctors".');
       return;
     }
 
     setIsAddingPatient(true);
-    const assigned = assignAll ? ['all'] : selectedDocs;
+    const assigned = assignAll ? ['ALL'] : selectedDocs;
     const tokenVal = manualToken.trim() ? parseInt(manualToken, 10) : undefined;
-    
+
     const success = await addPatient(patientName, assigned, tokenVal);
     setIsAddingPatient(false);
-    
+
     if (success) {
       setPatientName('');
       setManualToken('');
@@ -92,7 +172,7 @@ export const ReceptionistDashboard: React.FC = () => {
     }
   };
 
-  const handleSettingsSubmit = async (e: React.FormEvent) => {
+  const handleDurationSave = async (e: React.MouseEvent) => {
     e.preventDefault();
     const time = parseInt(consultationTime, 10);
     if (isNaN(time) || time < 1) return;
@@ -102,10 +182,12 @@ export const ReceptionistDashboard: React.FC = () => {
     setIsEditingSettings(false);
   };
 
-  const handleReset = async () => {
-    if (window.confirm('WARNING: Wiping the session will delete all doctors and clear today\'s patient tokens. Proceed?')) {
-      await resetSession();
-    }
+  const handleAllSettingsSubmit = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsEditingSettings(true);
+    // Send the already-saved average consultation time, not the potentially modified but unsaved local input
+    await updateSettings(settings.averageConsultationTime, sessionStatus, tempDoctors, mostMsg, leastMsg);
+    setIsEditingSettings(false);
   };
 
   const handleDocCheckboxChange = (code: string) => {
@@ -114,6 +196,10 @@ export const ReceptionistDashboard: React.FC = () => {
     } else {
       setSelectedDocs([...selectedDocs, code]);
     }
+  };
+
+  const handleDoctorAvailabilityChange = (code: string, avail: 'available' | 'lunch-break' | 'not-available') => {
+    setTempDoctors(prev => prev.map(d => d.code === code ? { ...d, availability: avail } : d));
   };
 
   const formatTime = (dateStr: string) => {
@@ -126,7 +212,7 @@ export const ReceptionistDashboard: React.FC = () => {
   };
 
   const renderAssignedDoctors = (patient: Patient) => {
-    if (patient.assignedDoctors.includes('all')) {
+    if (patient.assignedDoctors.includes('ALL')) {
       return (
         <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 rounded-md text-[10px] font-bold uppercase">
           All Doctors
@@ -136,8 +222,8 @@ export const ReceptionistDashboard: React.FC = () => {
     return (
       <div className="flex gap-1 flex-wrap">
         {patient.assignedDoctors.map(code => (
-          <span 
-            key={code} 
+          <span
+            key={code}
             className="px-2 py-0.5 bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 rounded-md text-[10px] font-extrabold uppercase"
           >
             {code}
@@ -196,7 +282,7 @@ export const ReceptionistDashboard: React.FC = () => {
             <Activity className="h-6 w-6" />
           </div>
           <div>
-            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Active consultations</p>
+            <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Active Consultations</p>
             <h3 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
               {currentServingCount} <span className="text-sm font-normal text-slate-400 dark:text-slate-500">serving</span>
             </h3>
@@ -204,32 +290,100 @@ export const ReceptionistDashboard: React.FC = () => {
         </div>
       </div>
 
+      {/* Lunch Break Banner */}
+      {settings.sessionStatus === 'lunch-break' && (
+        <div className="mb-6 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded-2xl text-sm font-semibold text-amber-800 dark:text-amber-400 flex items-center space-x-3.5 animate-pulse">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
+          <span>Lunch Break Active — Patient calling and table actions are temporarily frozen. Registering new patients is still allowed.</span>
+        </div>
+      )}
+
       {/* Main Grid: Control Panel & Live Queue */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Column: Receptionist Actions */}
         <div className="space-y-6">
-          {/* Action Card: Call Next */}
+          {/* Calling System Card */}
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs transition-colors duration-300">
             <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
-              <Activity className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
-              Queue Control
+              <Phone className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
+              Calling System
             </h3>
-            
-            <div className="space-y-4">
-              <button
-                onClick={callNextPatient}
-                disabled={waitingCount === 0}
-                className={`w-full inline-flex justify-center items-center py-3 rounded-xl text-md font-semibold transition shadow-sm cursor-pointer ${
-                  waitingCount === 0
-                    ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed border border-slate-200 dark:border-slate-800'
-                    : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 text-white'
-                }`}
-              >
-                <Play className="h-5 w-5 mr-2" />
-                Call Next Patient
-              </button>
-              {waitingCount === 0 && (
-                <p className="text-xs text-slate-400 dark:text-slate-500 text-center">Waiting list is currently empty</p>
+
+            <div className="space-y-3">
+              {/* Doctor Selector */}
+              {settings.doctors.length > 0 ? (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                      Select Doctor
+                    </label>
+                    <select
+                      value={selectedCallingDocCode}
+                      onChange={(e) => setSelectedCallingDocCode(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                    >
+                      {settings.doctors.map(doc => (
+                        <option key={doc.code} value={doc.code}>
+                          Dr. {doc.name} [{doc.code}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Doctor Status Readout */}
+                  {selectedCallingDocCode && (() => {
+                    const doc = settings.doctors.find(d => d.code === selectedCallingDocCode);
+                    if (!doc) return null;
+                    const callingPatient = activeQueue.find(p => p.calledBy === selectedCallingDocCode && p.status === 'calling');
+                    const servingPatient = activeQueue.find(p => p.calledBy === selectedCallingDocCode && p.status === 'serving');
+                    let statusText = 'Room Available (Free)';
+                    let statusColor = 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/30';
+                    if (doc.availability === 'lunch-break') {
+                      statusText = 'Lunch Break';
+                      statusColor = 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/30';
+                    } else if (doc.availability === 'not-available') {
+                      statusText = 'Away / Not Available';
+                      statusColor = 'text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900/30';
+                    } else if (callingPatient) {
+                      statusText = `Busy — Calling Token #${callingPatient.tokenNumber}`;
+                      statusColor = 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-900/30';
+                    } else if (servingPatient) {
+                      statusText = `Busy — Serving Token #${servingPatient.tokenNumber}`;
+                      statusColor = 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/30';
+                    }
+                    return (
+                      <div className={`px-3 py-2 rounded-xl border text-xs font-semibold ${statusColor}`}>
+                        {statusText}
+                      </div>
+                    );
+                  })()}
+
+                  <button
+                    onClick={() => handleCallNextForDoctor(selectedCallingDocCode || (settings.doctors[0]?.code || ''))}
+                    disabled={waitingCount === 0 || isCallingNext || !settings.doctors.length || settings.sessionStatus === 'lunch-break'}
+                    className={`w-full inline-flex justify-center items-center py-3 rounded-xl text-md font-semibold transition shadow-sm cursor-pointer ${
+                      waitingCount === 0 || isCallingNext || !settings.doctors.length || settings.sessionStatus === 'lunch-break'
+                        ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed border border-slate-200 dark:border-slate-800'
+                        : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 text-white'
+                    }`}
+                  >
+                    {isCallingNext ? (
+                      <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                    ) : (
+                      <Play className="h-5 w-5 mr-2" />
+                    )}
+                    {settings.sessionStatus === 'lunch-break'
+                      ? 'Queue Frozen (Lunch Break)'
+                      : isCallingNext
+                        ? 'Calling Next Patient...'
+                        : 'Call Next Patient'}
+                  </button>
+                  {waitingCount === 0 && settings.sessionStatus !== 'lunch-break' && (
+                    <p className="text-xs text-slate-400 dark:text-slate-500 text-center">Waiting list is currently empty</p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-slate-400 dark:text-slate-500 text-center py-3">No doctors registered in this session.</p>
               )}
             </div>
           </div>
@@ -277,7 +431,7 @@ export const ReceptionistDashboard: React.FC = () => {
                 <span className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
                   Doctor Assignment
                 </span>
-                
+
                 <div className="space-y-2.5 p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200/60 dark:border-slate-800 rounded-xl max-h-[160px] overflow-y-auto">
                   <label className="flex items-center space-x-2 text-sm font-semibold text-slate-700 dark:text-slate-300 cursor-pointer hover:text-slate-900 dark:hover:text-white transition">
                     <input
@@ -294,8 +448,8 @@ export const ReceptionistDashboard: React.FC = () => {
 
                   {/* Individual registered doctors list */}
                   {settings.doctors.map((doc) => (
-                    <label 
-                      key={doc.code} 
+                    <label
+                      key={doc.code}
                       className={`flex items-center space-x-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer transition ${
                         assignAll ? 'opacity-40 cursor-not-allowed' : 'hover:text-slate-900 dark:hover:text-white'
                       }`}
@@ -318,8 +472,12 @@ export const ReceptionistDashboard: React.FC = () => {
                 disabled={isAddingPatient || !patientName.trim()}
                 className="w-full inline-flex justify-center items-center py-2.5 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 text-white rounded-xl font-semibold transition cursor-pointer disabled:bg-blue-400 dark:disabled:bg-blue-800/50"
               >
-                {isAddingPatient ? 'Adding...' : 'Generate Token'}
-                <ChevronRight className="h-4 w-4 ml-1" />
+                {isAddingPatient ? (
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                ) : (
+                  <ChevronRight className="h-4 w-4 ml-1" />
+                )}
+                {isAddingPatient ? 'Adding Patient...' : 'Generate Token'}
               </button>
             </form>
           </div>
@@ -328,10 +486,9 @@ export const ReceptionistDashboard: React.FC = () => {
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-xs transition-colors duration-300">
             <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4 flex items-center">
               <Sliders className="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
-              Session Settings
             </h3>
-            
-            <form onSubmit={handleSettingsSubmit} className="space-y-4 border-b border-slate-100 dark:border-slate-800/80 pb-4 mb-4">
+            <div className="space-y-4 border-b border-slate-100 dark:border-slate-800/80 pb-4 mb-4">
+              {/* Avg Consultation Duration */}
               <div>
                 <label htmlFor="consultation-duration" className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
                   Avg Duration (Minutes)
@@ -347,24 +504,119 @@ export const ReceptionistDashboard: React.FC = () => {
                     required
                   />
                   <button
-                    type="submit"
-                    disabled={isEditingSettings || parseInt(consultationTime) === settings.averageConsultationTime}
+                    type="button"
+                    onClick={handleDurationSave}
+                    disabled={isEditingSettings}
                     className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 dark:bg-slate-800 dark:hover:bg-slate-750 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white rounded-xl font-semibold transition cursor-pointer shrink-0"
                   >
-                    Save
+                    {isEditingSettings ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : 'Save'}
                   </button>
                 </div>
               </div>
-            </form>
+
+              {/* Clinic Status Selector */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5">
+                  Clinic Status
+                </label>
+                <select
+                  value={sessionStatus}
+                  onChange={(e) => setSessionStatus(e.target.value as 'open' | 'lunch-break' | 'closed')}
+                  className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                >
+                  <option value="open" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Open (Normal Operation)</option>
+                  <option value="lunch-break" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Lunch Break (On hold)</option>
+                  <option value="closed" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Closed (Session ended)</option>
+                </select>
+              </div>
+
+              {/* Doctor Availabilities */}
+              {tempDoctors.length > 0 && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
+                     Doctor Availability
+                  </label>
+                  <div className="space-y-2">
+                    {tempDoctors.map((doc) => (
+                      <div key={doc.code} className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 shrink-0">{doc.name} [{doc.code}]</span>
+                        <select
+                          value={doc.availability || 'available'}
+                          onChange={(e) => handleDoctorAvailabilityChange(doc.code, e.target.value as 'available' | 'lunch-break' | 'not-available')}
+                          className="flex-grow px-2 py-1.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition"
+                        >
+                          <option value="available" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Available</option>
+                          <option value="lunch-break" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Lunch Break</option>
+                          <option value="not-available" className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">Not Available</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Custom Announcements */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  Most Significant Announcement
+                </label>
+                <input
+                  type="text"
+                  placeholder="Bold alert shown prominently on TV screen..."
+                  value={mostMsg}
+                  onChange={(e) => setMostMsg(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition"
+                />
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">Displayed as a pulsing red alert banner at the top of the TV screen.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  Least Significant Announcement
+                </label>
+                <input
+                  type="text"
+                  placeholder="Low-priority note shown quietly in footer..."
+                  value={leastMsg}
+                  onChange={(e) => setLeastMsg(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-slate-500/20 focus:border-slate-500 transition"
+                />
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">Shown as a small, quiet footnote requiring focus to read on the TV screen.</p>
+              </div>
+
+              {/* Primary submit button for all settings */}
+              <button
+                type="button"
+                onClick={handleAllSettingsSubmit}
+                disabled={isEditingSettings}
+                className="w-full inline-flex justify-center items-center py-2.5 bg-blue-600 hover:bg-blue-700 dark:bg-blue-600 dark:hover:bg-blue-500 disabled:bg-blue-400 dark:disabled:bg-blue-800/50 text-white rounded-xl font-bold text-sm transition cursor-pointer disabled:cursor-not-allowed"
+              >
+                {isEditingSettings ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4 mr-2" />
+                )}
+                {isEditingSettings ? 'Updating Settings...' : 'Update All Settings'}
+              </button>
+            </div>
 
             <div className="space-y-2">
               {/* Reset Session Button */}
               <button
                 onClick={handleReset}
-                className="w-full inline-flex justify-center items-center py-2.5 border border-rose-200 dark:border-rose-900/50 hover:bg-rose-50 dark:hover:bg-rose-950/20 text-rose-605 dark:text-rose-400 rounded-xl font-bold text-xs transition cursor-pointer"
+                disabled={isResetting}
+                className="w-full inline-flex justify-center items-center py-2.5 border border-rose-200 dark:border-rose-900/50 hover:bg-rose-50 dark:hover:bg-rose-950/20 text-rose-605 dark:text-rose-400 rounded-xl font-bold text-xs transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <RefreshCw className="h-3.5 w-3.5 mr-2" />
-                Reset & Wipe Active Session
+                {isResetting ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5 mr-2" />
+                )}
+                {isResetting ? 'Wiping Session...' : 'Reset & Wipe Active Session'}
               </button>
 
               {/* Leave Session Button */}
@@ -417,8 +669,8 @@ export const ReceptionistDashboard: React.FC = () => {
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80 text-sm">
                   {filteredActiveQueue.length > 0 ? (
                     filteredActiveQueue.map((patient) => (
-                      <tr 
-                        key={patient._id} 
+                      <tr
+                        key={patient._id}
                         className={`hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition ${
                           patient.status === 'serving' ? 'bg-emerald-50/20 dark:bg-emerald-950/10' : ''
                         }`}
@@ -455,36 +707,56 @@ export const ReceptionistDashboard: React.FC = () => {
                             {patient.status === 'waiting' && (
                               <>
                                 <button
-                                  onClick={() => completePatient(patient._id)}
-                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 rounded-lg transition cursor-pointer"
+                                  onClick={() => handleCompletePatient(patient._id)}
+                                  disabled={processingPatientId === patient._id || settings.sessionStatus === 'lunch-break'}
+                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 rounded-lg transition cursor-pointer disabled:opacity-55"
                                   title="Complete Consultation"
                                 >
-                                  <Check className="h-4 w-4" />
+                                  {processingPatientId === patient._id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Check className="h-4 w-4" />
+                                  )}
                                 </button>
                                 <button
-                                  onClick={() => skipPatient(patient._id)}
-                                  className="inline-flex items-center justify-center p-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 rounded-lg transition cursor-pointer"
+                                  onClick={() => handleSkipPatient(patient._id)}
+                                  disabled={processingPatientId === patient._id || settings.sessionStatus === 'lunch-break'}
+                                  className="inline-flex items-center justify-center p-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 rounded-lg transition cursor-pointer disabled:opacity-55"
                                   title="Skip Patient"
                                 >
-                                  <Slash className="h-4 w-4" />
+                                  {processingPatientId === patient._id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Slash className="h-4 w-4" />
+                                  )}
                                 </button>
                               </>
                             )}
                             {(patient.status === 'serving' || patient.status === 'calling') && (
                               <>
                                 <button
-                                  onClick={() => completePatient(patient._id)}
-                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-550 text-white rounded-lg transition shadow-xs cursor-pointer"
+                                  onClick={() => handleCompletePatient(patient._id)}
+                                  disabled={processingPatientId === patient._id || settings.sessionStatus === 'lunch-break'}
+                                  className="inline-flex items-center justify-center p-1.5 bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-550 text-white rounded-lg transition shadow-xs cursor-pointer disabled:opacity-55"
                                   title="Complete"
                                 >
-                                  <Check className="h-4 w-4" />
+                                  {processingPatientId === patient._id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Check className="h-4 w-4" />
+                                  )}
                                 </button>
                                 <button
-                                  onClick={() => skipPatient(patient._id)}
-                                  className="inline-flex items-center justify-center p-1.5 bg-amber-500 hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-550 text-white rounded-lg transition shadow-xs cursor-pointer"
+                                  onClick={() => handleSkipPatient(patient._id)}
+                                  disabled={processingPatientId === patient._id || settings.sessionStatus === 'lunch-break'}
+                                  className="inline-flex items-center justify-center p-1.5 bg-amber-500 hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-550 text-white rounded-lg transition shadow-xs cursor-pointer disabled:opacity-55"
                                   title="Skip"
                                 >
-                                  <Slash className="h-4 w-4" />
+                                  {processingPatientId === patient._id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Slash className="h-4 w-4" />
+                                  )}
                                 </button>
                               </>
                             )}
@@ -510,7 +782,7 @@ export const ReceptionistDashboard: React.FC = () => {
               <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">Skipped Patients</h3>
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Skipped patients who can be restored back to queue</p>
             </div>
-            
+
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -544,11 +816,16 @@ export const ReceptionistDashboard: React.FC = () => {
                         </td>
                         <td className="py-4 px-6 text-right">
                           <button
-                            onClick={() => restorePatient(patient._id)}
-                            className="inline-flex items-center px-3 py-1.5 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-605 dark:text-blue-400 rounded-lg text-xs font-bold transition cursor-pointer"
+                            onClick={() => handleRestorePatient(patient._id)}
+                            disabled={processingPatientId === patient._id || settings.sessionStatus === 'lunch-break'}
+                            className="inline-flex items-center px-3 py-1.5 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-605 dark:text-blue-400 rounded-lg text-xs font-bold transition cursor-pointer disabled:opacity-55"
                           >
-                            <RotateCcw className="h-3.5 w-3.5 mr-1" />
-                            Restore
+                            {processingPatientId === patient._id ? (
+                              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-3.5 w-3.5 mr-1" />
+                            )}
+                            {processingPatientId === patient._id ? 'Restoring...' : 'Restore'}
                           </button>
                         </td>
                       </tr>

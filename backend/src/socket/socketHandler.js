@@ -1,6 +1,6 @@
 const { Server } = require('socket.io');
 const Patient = require('../models/Patient');
-const QueueSettings = require('../models/QueueSettings');
+const Session = require('../models/Session');
 
 let io = null;
 
@@ -21,7 +21,7 @@ const getQueueData = async (sessionId) => {
   }
 
   // Fetch settings for this session
-  let settings = await QueueSettings.findOne({ sessionId });
+  let settings = await Session.findOne({ sessionId });
   if (!settings) {
     settings = { sessionId, averageConsultationTime: 15, isInitialized: false, doctors: [] };
   }
@@ -103,7 +103,7 @@ const getQueueData = async (sessionId) => {
 
 const recalculateWaitTimes = async (sessionId) => {
   if (!sessionId) return;
-  let settings = await QueueSettings.findOne({ sessionId });
+  let settings = await Session.findOne({ sessionId });
   if (!settings) return;
   const avgTime = settings.averageConsultationTime;
   const doctorsList = settings.doctors || [];
@@ -122,13 +122,17 @@ const recalculateWaitTimes = async (sessionId) => {
       calledBy: doc.code,
       status: { $in: ['calling', 'serving'] }
     });
-    doctorQueueTime[doc.code] = isBusy ? avgTime : 0;
+    if (doc.availability && doc.availability !== 'available') {
+      doctorQueueTime[doc.code] = 999999;
+    } else {
+      doctorQueueTime[doc.code] = isBusy ? avgTime : 0;
+    }
   }
 
   const waiting = await Patient.find({ sessionId, status: 'waiting' }).sort({ createdAt: 1 });
   for (const p of waiting) {
-    let eligibleDocs = p.assignedDoctors || ['all'];
-    if (eligibleDocs.includes('all')) {
+    let eligibleDocs = p.assignedDoctors || ['ALL'];
+    if (eligibleDocs.includes('ALL')) {
       eligibleDocs = doctorsList.map((d) => d.code);
     }
 

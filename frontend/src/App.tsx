@@ -12,7 +12,7 @@ import { Activity, ShieldAlert } from 'lucide-react';
 type ViewType = 'receptionist' | 'patient' | 'analytics' | 'doctor';
 
 const AppContent: React.FC = () => {
-  const { sessionId, joinSession } = useQueue();
+  const { sessionId, role, joinSession } = useQueue();
   const [tvSessionInput, setTvSessionInput] = useState('');
 
   // Read initial view from URL query params (useful for TV screens)
@@ -74,23 +74,43 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Auto-join from URL parameter if present
+  // Auto-join from URL parameter if present on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const sessionParam = params.get('session');
+    const viewParam = params.get('view') as ViewType;
+    const doctorParam = params.get('doctor');
+
     if (sessionParam && !sessionId) {
-      joinSession(sessionParam);
+      let targetRole: 'receptionist' | 'doctor' | 'display' = 'receptionist';
+      if (viewParam === 'patient') targetRole = 'display';
+      else if (viewParam === 'doctor') targetRole = 'doctor';
+      
+      joinSession(sessionParam, targetRole, doctorParam);
     }
   }, [sessionId, joinSession]);
+
+  // Route/Access guards: prevent viewing unauthorized screens when logged in
+  useEffect(() => {
+    if (sessionId && role) {
+      if (role === 'receptionist' && (view === 'doctor' || view === 'patient')) {
+        handleSetView('receptionist');
+      } else if (role === 'doctor' && (view === 'receptionist' || view === 'patient')) {
+        handleSetView('doctor');
+      } else if (role === 'display' && view !== 'patient') {
+        handleSetView('patient');
+      }
+    }
+  }, [sessionId, role, view]);
 
   const handleTVJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (tvSessionInput.trim().length === 4) {
-      await joinSession(tvSessionInput);
+      await joinSession(tvSessionInput, 'display', null);
     }
   };
 
-  // Edge Case: If session is not initialized or joined, force SessionSetup/Portal
+  // 1. If not logged into any session
   if (!sessionId) {
     if (view === 'patient') {
       // Patient Waiting TV screen offline placeholder with Session ID entry
@@ -102,7 +122,7 @@ const AppContent: React.FC = () => {
           </div>
           
           <div className="my-auto py-16 flex flex-col items-center max-w-sm mx-auto">
-            <ShieldAlert className="h-14 w-14 text-slate-655 mb-4 animate-bounce" />
+            <ShieldAlert className="h-14 w-14 text-slate-600 mb-4 animate-bounce" />
             <h2 className="text-xl font-bold text-slate-300">Connect to Lobby Board</h2>
             <p className="text-xs text-slate-500 mt-1 mb-6">
               Enter the 4-digit clinical session ID to stream real-time queue states.
@@ -135,7 +155,7 @@ const AppContent: React.FC = () => {
       );
     }
 
-    // Receptionist / Doctor dashboards show Setup/Join Page
+    // Receptionist / Doctor dashboards show Setup/Join Portal
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-300">
         <Navbar 
@@ -152,9 +172,20 @@ const AppContent: React.FC = () => {
     );
   }
 
+  // 2. If logged in as Patient Waiting TV Display: hide Navbar completely
+  if (role === 'display') {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col p-4 sm:p-8 transition-colors">
+        <main className="flex-grow w-full h-full flex flex-col">
+          <PatientWaitingScreen />
+        </main>
+      </div>
+    );
+  }
+
+  // 3. Logged in dashboard layout (Receptionist or Doctor)
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col transition-colors duration-300">
-      {/* Top Navigation Bar */}
       <Navbar 
         currentView={view} 
         setView={handleSetView} 
@@ -162,15 +193,12 @@ const AppContent: React.FC = () => {
         toggleTheme={toggleTheme} 
       />
 
-      {/* Main View Container */}
       <main className="flex-grow max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
-        {view === 'receptionist' && <ReceptionistDashboard />}
-        {view === 'patient' && <PatientWaitingScreen />}
+        {view === 'receptionist' && role === 'receptionist' && <ReceptionistDashboard />}
+        {view === 'doctor' && role === 'doctor' && <DoctorDashboard />}
         {view === 'analytics' && <QueueAnalytics />}
-        {view === 'doctor' && <DoctorDashboard />}
       </main>
 
-      {/* Toast Notification Manager */}
       <ToastContainer />
     </div>
   );

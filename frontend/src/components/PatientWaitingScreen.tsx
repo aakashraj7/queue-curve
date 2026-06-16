@@ -144,6 +144,17 @@ export const PatientWaitingScreen: React.FC = () => {
         </div>
       </div>
 
+      {/* Most Significant Message (Vibrant banner style) */}
+      {settings.mostSignificantMessage && (
+        <div className="mx-auto max-w-4xl w-full bg-rose-600/90 border border-rose-500/30 px-6 py-4 rounded-3xl flex items-center space-x-3.5 shadow-lg shadow-rose-600/10 animate-pulse z-10 mt-6 mb-2">
+          <span className="flex-shrink-0 w-3.5 h-3.5 rounded-full bg-rose-400 animate-ping" />
+          <div className="text-left font-sans">
+            <span className="block text-[10px] font-black tracking-widest text-rose-300 uppercase">Alert Announcement</span>
+            <span className="block text-sm sm:text-base font-extrabold text-white leading-tight mt-0.5">{settings.mostSignificantMessage}</span>
+          </div>
+        </div>
+      )}
+
       {/* Main Calling Section */}
       <div className="my-auto py-8 z-10 w-full">
         {callingPatients.length > 0 ? (
@@ -207,7 +218,13 @@ export const PatientWaitingScreen: React.FC = () => {
               let badgeText = 'Room Available';
               let badgeColor = 'text-slate-500 bg-slate-800/20 border-slate-850';
               
-              if (isCalling) {
+              if (doc.availability === 'lunch-break') {
+                badgeText = 'Lunch Break';
+                badgeColor = 'text-amber-500 bg-amber-500/10 border-amber-500/20';
+              } else if (doc.availability === 'not-available') {
+                badgeText = 'Away / Not Available';
+                badgeColor = 'text-rose-500 bg-rose-500/10 border-rose-500/20';
+              } else if (isCalling) {
                 badgeText = `Calling Token #${isCalling.tokenNumber}`;
                 badgeColor = 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20 animate-pulse';
               } else if (isServing) {
@@ -278,10 +295,45 @@ export const PatientWaitingScreen: React.FC = () => {
           <span className="mx-1">•</span>
           <span>Next wait: <span className="text-blue-500">{lobbyWaitTime} minutes</span></span>
         </div>
-        <div>
-          Real-time updates active • Queue Cure Systems
+        <div className="flex items-center justify-between sm:justify-end gap-3 flex-grow sm:flex-grow-0">
+          {settings.leastSignificantMessage && (
+            <span className="text-slate-600 font-semibold text-[10px] lowercase tracking-normal italic max-w-xs truncate mr-2">
+              ({settings.leastSignificantMessage})
+            </span>
+          )}
+          <span>Real-time updates active • Queue Cure Systems</span>
         </div>
       </div>
+
+      {/* Clinic Status Overlay */}
+      {settings.sessionStatus && settings.sessionStatus !== 'open' && (
+        <div className="absolute inset-0 bg-slate-950/98 flex flex-col items-center justify-center text-center p-8 sm:p-12 z-50 animate-fade-in">
+          {/* Animated Glowing Icon Wrapper */}
+          <div className="bg-blue-600 p-8 sm:p-10 rounded-full text-white shadow-[0_0_80px_rgba(59,130,246,0.35)] border-4 border-blue-500/30 mb-8 animate-bounce">
+            <Monitor className="h-16 w-16 sm:h-20 sm:w-20 text-white animate-pulse" />
+          </div>
+          
+          {/* Bold, prominent headings */}
+          <h2 className="text-5xl sm:text-7xl font-black tracking-tight text-white mb-6 uppercase">
+            {settings.sessionStatus === 'lunch-break' ? 'Clinic on Lunch Break' : 'Clinic Session Closed'}
+          </h2>
+          
+          {/* Large, legible subtext */}
+          <p className="text-slate-300 max-w-3xl text-lg sm:text-2xl font-semibold leading-relaxed px-4">
+            {settings.sessionStatus === 'lunch-break' 
+              ? 'The clinic is currently on a lunch break. Patient queues and calls will resume shortly.' 
+              : 'The clinic session has ended or is closed. Please check back with the receptionist.'}
+          </p>
+
+          {/* Active status pulse pill */}
+          <div className="mt-12 flex items-center gap-2.5 bg-slate-800/80 px-6 py-3 rounded-full border border-slate-700/50 shadow-inner">
+            <span className="w-3.5 h-3.5 rounded-full bg-amber-500 animate-pulse" />
+            <span className="text-sm sm:text-base font-extrabold tracking-wider uppercase text-slate-200">
+              {settings.sessionStatus === 'lunch-break' ? 'Queue Paused' : 'Lobby Offline'}
+            </span>
+          </div>
+        </div>
+      )}
 
     </div>
   );

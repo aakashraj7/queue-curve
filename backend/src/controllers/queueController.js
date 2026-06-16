@@ -1,5 +1,5 @@
 const Patient = require('../models/Patient');
-const QueueSettings = require('../models/QueueSettings');
+const Session = require('../models/Session');
 const {
   recalculateWaitTimes,
   broadcastQueueUpdate,
@@ -21,7 +21,7 @@ const getUniqueSessionId = async () => {
   let attempts = 0;
   while (attempts < 100) {
     const code = generateSessionId();
-    const exists = await QueueSettings.exists({ sessionId: code });
+    const exists = await Session.exists({ sessionId: code });
     if (!exists) return code;
     attempts++;
   }
@@ -34,7 +34,7 @@ const validateSession = async (req, res) => {
     const { sessionId } = req.params;
     const cleanId = sessionId.trim().toUpperCase();
 
-    const settings = await QueueSettings.findOne({ sessionId: cleanId });
+    const settings = await Session.findOne({ sessionId: cleanId });
     if (!settings || !settings.isInitialized) {
       return res.status(404).json({ message: `Active session "${cleanId}" not found.` });
     }
@@ -87,10 +87,17 @@ const initializeSession = async (req, res) => {
     await Patient.deleteMany({ sessionId });
 
     // Save session configurations
-    const settings = new QueueSettings({
+    const settings = new Session({
       sessionId,
       averageConsultationTime: time,
-      doctors: doctors.map(d => ({ code: d.code.trim().toUpperCase(), name: d.name.trim() })),
+      sessionStatus: 'open',
+      mostSignificantMessage: '',
+      leastSignificantMessage: '',
+      doctors: doctors.map(d => ({ 
+        code: d.code.trim().toUpperCase(), 
+        name: d.name.trim(),
+        availability: 'available'
+      })),
       isInitialized: true
     });
     
@@ -114,7 +121,7 @@ const resetSession = async (req, res) => {
     await Patient.deleteMany({ sessionId });
 
     // 2. Delete the session settings
-    await QueueSettings.deleteOne({ sessionId });
+    await Session.deleteOne({ sessionId });
 
     // 3. Broadcast reset room-wide
     await broadcastQueueUpdate(sessionId, 'session-reset');
@@ -140,7 +147,7 @@ const addPatient = async (req, res) => {
     }
 
     // Verify session still exists
-    const settings = await QueueSettings.findOne({ sessionId });
+    const settings = await Session.findOne({ sessionId });
     if (!settings || !settings.isInitialized) {
       return res.status(400).json({ message: 'Clinic session is active no longer. Please reload or log in.' });
     }
@@ -161,7 +168,7 @@ const addPatient = async (req, res) => {
     }
 
     // Process doctor assignment lists
-    let doctorsArray = ['all'];
+    let doctorsArray = ['ALL'];
     if (Array.isArray(assignedDoctors) && assignedDoctors.length > 0) {
       doctorsArray = assignedDoctors.map(d => d.trim().toUpperCase());
     }
@@ -233,9 +240,12 @@ const callNextPatientDoctor = async (req, res) => {
     const docCode = code.trim().toUpperCase();
 
     // Validate doctor code exists in session settings
-    const settings = await QueueSettings.findOne({ sessionId });
+    const settings = await Session.findOne({ sessionId });
     if (!settings || !settings.isInitialized) {
       return res.status(400).json({ message: 'Session is not initialized.' });
+    }
+    if (settings.sessionStatus === 'lunch-break') {
+      return res.status(400).json({ message: 'All queue progressions are frozen during lunch break.' });
     }
     const docExists = settings.doctors.some(d => d.code === docCode);
     if (!docExists) {
@@ -271,7 +281,7 @@ const callNextPatientDoctor = async (req, res) => {
       status: 'waiting',
       $or: [
         { assignedDoctors: docCode },
-        { assignedDoctors: 'all' }
+        { assignedDoctors: 'ALL' }
       ]
     }).sort({ createdAt: 1 });
 
@@ -306,6 +316,11 @@ const arrivedPatient = async (req, res) => {
     const sessionId = req.headers['x-session-id'];
     if (!sessionId) {
       return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
+    }
+
+    const settings = await Session.findOne({ sessionId });
+    if (settings && settings.sessionStatus === 'lunch-break') {
+      return res.status(400).json({ message: 'All queue progressions are frozen during lunch break.' });
     }
 
     const { id } = req.params;
@@ -343,6 +358,11 @@ const completePatient = async (req, res) => {
       return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
+    const settings = await Session.findOne({ sessionId });
+    if (settings && settings.sessionStatus === 'lunch-break') {
+      return res.status(400).json({ message: 'All queue progressions are frozen during lunch break.' });
+    }
+
     const { id } = req.params;
     const patient = await Patient.findOne({ _id: id, sessionId });
 
@@ -377,6 +397,11 @@ const skipPatient = async (req, res) => {
       return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
+    const settings = await Session.findOne({ sessionId });
+    if (settings && settings.sessionStatus === 'lunch-break') {
+      return res.status(400).json({ message: 'All queue progressions are frozen during lunch break.' });
+    }
+
     const { id } = req.params;
     const patient = await Patient.findOne({ _id: id, sessionId });
 
@@ -407,6 +432,11 @@ const restorePatient = async (req, res) => {
       return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
+    const settings = await Session.findOne({ sessionId });
+    if (settings && settings.sessionStatus === 'lunch-break') {
+      return res.status(400).json({ message: 'All queue progressions are frozen during lunch break.' });
+    }
+
     const { id } = req.params;
     const patient = await Patient.findOne({ _id: id, sessionId });
 
@@ -432,7 +462,7 @@ const restorePatient = async (req, res) => {
   }
 };
 
-// Update global session settings (consultation duration)
+// Update global session settings (consultation duration, clinic status, doctor availabilities)
 const updateSettings = async (req, res) => {
   try {
     const sessionId = req.headers['x-session-id'];
@@ -440,25 +470,51 @@ const updateSettings = async (req, res) => {
       return res.status(400).json({ message: 'Session ID (x-session-id) is required.' });
     }
 
-    const { averageConsultationTime } = req.body;
+    const { averageConsultationTime, sessionStatus, doctors, mostSignificantMessage, leastSignificantMessage } = req.body;
 
     const time = parseInt(averageConsultationTime, 10);
     if (isNaN(time) || time < 1) {
       return res.status(400).json({ message: 'Average consultation time must be a number greater than 0.' });
     }
 
-    let settings = await QueueSettings.findOne({ sessionId });
+    let settings = await Session.findOne({ sessionId });
     if (!settings) {
       return res.status(404).json({ message: 'Session settings not found.' });
     }
     
+    const timeChanged = settings.averageConsultationTime !== time;
     settings.averageConsultationTime = time;
+    if (sessionStatus) {
+      settings.sessionStatus = sessionStatus;
+    }
+    if (mostSignificantMessage !== undefined) {
+      settings.mostSignificantMessage = mostSignificantMessage;
+    }
+    if (leastSignificantMessage !== undefined) {
+      settings.leastSignificantMessage = leastSignificantMessage;
+    }
+    if (doctors && Array.isArray(doctors)) {
+      settings.doctors = doctors.map(d => ({
+        code: d.code.trim().toUpperCase(),
+        name: d.name.trim(),
+        availability: d.availability || 'available'
+      }));
+    }
     await settings.save();
 
     await recalculateWaitTimes(sessionId);
-    await broadcastQueueUpdate(sessionId, 'consultation-time-changed', {
-      averageConsultationTime: settings.averageConsultationTime
-    });
+    
+    if (timeChanged) {
+      await broadcastQueueUpdate(sessionId, 'consultation-time-changed', {
+        averageConsultationTime: settings.averageConsultationTime,
+        sessionStatus: settings.sessionStatus,
+        doctors: settings.doctors,
+        mostSignificantMessage: settings.mostSignificantMessage,
+        leastSignificantMessage: settings.leastSignificantMessage
+      });
+    } else {
+      await broadcastQueueUpdate(sessionId);
+    }
 
     res.json({ message: 'Queue settings updated successfully.', settings });
   } catch (error) {

@@ -18,11 +18,15 @@ export interface Patient {
 export interface Doctor {
   code: string;
   name: string;
+  availability?: 'available' | 'lunch-break' | 'not-available';
 }
 
 export interface QueueSettings {
   sessionId?: string;
   averageConsultationTime: number;
+  sessionStatus?: 'open' | 'lunch-break' | 'closed';
+  mostSignificantMessage?: string;
+  leastSignificantMessage?: string;
   isInitialized: boolean;
   doctors: Doctor[];
 }
@@ -43,6 +47,8 @@ export interface ToastMessage {
 
 interface QueueContextType {
   sessionId: string | null;
+  role: 'receptionist' | 'doctor' | 'display' | null;
+  doctorCode: string | null;
   activeQueue: Patient[];
   skippedQueue: Patient[];
   settings: QueueSettings;
@@ -51,7 +57,8 @@ interface QueueContextType {
   isConnected: boolean;
   loading: boolean;
   error: string | null;
-  joinSession: (id: string) => Promise<boolean>;
+  validateSession: (id: string) => Promise<Doctor[] | null>;
+  joinSession: (id: string, role: 'receptionist' | 'doctor' | 'display', doctorCode?: string | null) => Promise<boolean>;
   leaveSession: () => void;
   initializeSession: (time: number, doctors: Doctor[]) => Promise<string | null>;
   resetSession: () => Promise<void>;
@@ -62,7 +69,7 @@ interface QueueContextType {
   completePatient: (id: string) => Promise<void>;
   skipPatient: (id: string) => Promise<void>;
   restorePatient: (id: string) => Promise<void>;
-  updateSettings: (time: number) => Promise<void>;
+  updateSettings: (time: number, status?: 'open' | 'lunch-break' | 'closed', doctorsList?: Doctor[], mostMsg?: string, leastMsg?: string) => Promise<void>;
   removeToast: (id: string) => void;
   addToast: (message: string, type: ToastMessage['type']) => void;
 }
@@ -75,6 +82,13 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [sessionId, setSessionId] = useState<string | null>(() => {
     return localStorage.getItem('sessionId') || null;
   });
+  const [role, setRole] = useState<'receptionist' | 'doctor' | 'display' | null>(() => {
+    return (localStorage.getItem('role') as any) || null;
+  });
+  const [doctorCode, setDoctorCode] = useState<string | null>(() => {
+    return localStorage.getItem('doctorCode') || null;
+  });
+
   const [activeQueue, setActiveQueue] = useState<Patient[]>([]);
   const [skippedQueue, setSkippedQueue] = useState<Patient[]>([]);
   const [settings, setSettings] = useState<QueueSettings>({
@@ -111,7 +125,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Sync session ID to localStorage
+  // Sync state variables to localStorage
   useEffect(() => {
     if (sessionId) {
       localStorage.setItem('sessionId', sessionId);
@@ -119,6 +133,27 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       localStorage.removeItem('sessionId');
     }
   }, [sessionId]);
+
+  useEffect(() => {
+    if (role) {
+      localStorage.setItem('role', role);
+    } else {
+      localStorage.removeItem('role');
+    }
+  }, [role]);
+
+  const roleRef = useRef(role);
+  useEffect(() => {
+    roleRef.current = role;
+  }, [role]);
+
+  useEffect(() => {
+    if (doctorCode) {
+      localStorage.setItem('doctorCode', doctorCode);
+    } else {
+      localStorage.removeItem('doctorCode');
+    }
+  }, [doctorCode]);
 
   // Fetch initial queue state for current session
   const fetchInitialData = useCallback(async (currentSessionId: string) => {
@@ -188,45 +223,67 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // Real-time toast alerts
     socketConnection.on('patient-added', (data: { patientName: string; tokenNumber: number }) => {
-      addToast(`New Patient Added: ${data.patientName} (Token #${data.tokenNumber})`, 'success');
+      if (roleRef.current !== 'display') {
+        addToast(`New Patient Added: ${data.patientName} (Token #${data.tokenNumber})`, 'success');
+      }
     });
 
     socketConnection.on('next-patient-called', (data: { patientName: string; tokenNumber: number; doctorCode: string }) => {
-      addToast(`Calling Token #${data.tokenNumber} (${data.patientName}) to Room: ${data.doctorCode}`, 'info');
+      if (roleRef.current !== 'display') {
+        addToast(`Calling Token #${data.tokenNumber} (${data.patientName}) to Room: ${data.doctorCode}`, 'info');
+      }
     });
 
     socketConnection.on('patient-arrived', (data: { patientName: string; tokenNumber: number; doctorCode: string }) => {
-      addToast(`Patient Arrived: Token #${data.tokenNumber} (${data.patientName}) is now with ${data.doctorCode}`, 'success');
+      if (roleRef.current !== 'display') {
+        addToast(`Patient Arrived: Token #${data.tokenNumber} (${data.patientName}) is now with ${data.doctorCode}`, 'success');
+      }
     });
 
     socketConnection.on('patient-completed', (data: { patientName: string; tokenNumber: number }) => {
-      addToast(`Patient Consultation Completed: Token #${data.tokenNumber} - ${data.patientName}`, 'success');
+      if (roleRef.current !== 'display') {
+        addToast(`Patient Consultation Completed: Token #${data.tokenNumber} - ${data.patientName}`, 'success');
+      }
     });
 
     socketConnection.on('patient-skipped', (data: { patientName: string; tokenNumber: number }) => {
-      addToast(`Patient Skipped: ${data.patientName} (Token #${data.tokenNumber})`, 'warning');
+      if (roleRef.current !== 'display') {
+        addToast(`Patient Skipped: ${data.patientName} (Token #${data.tokenNumber})`, 'warning');
+      }
     });
 
     socketConnection.on('patient-restored', (data: { patientName: string; tokenNumber: number }) => {
-      addToast(`Patient Restored: ${data.patientName} (Token #${data.tokenNumber}) back in queue`, 'info');
+      if (roleRef.current !== 'display') {
+        addToast(`Patient Restored: ${data.patientName} (Token #${data.tokenNumber}) back in queue`, 'info');
+      }
     });
 
     socketConnection.on('consultation-time-changed', (data: { averageConsultationTime: number }) => {
-      addToast(`Settings Updated: Average consultation duration changed to ${data.averageConsultationTime} minutes`, 'info');
+      if (roleRef.current !== 'display') {
+        addToast(`Settings Updated: Average consultation duration changed to ${data.averageConsultationTime} minutes`, 'info');
+      }
     });
 
     socketConnection.on('session-initialized', (data: QueueSettings) => {
-      addToast(`Clinic session initialized with ${data.doctors.length} doctors.`, 'success');
+      if (roleRef.current !== 'display') {
+        addToast(`Clinic session initialized with ${data.doctors.length} doctors.`, 'success');
+      }
     });
 
     socketConnection.on('session-reset', () => {
-      addToast('Clinic session has been reset. Local state cleared.', 'warning');
+      if (roleRef.current !== 'display') {
+        addToast('Clinic session has been reset by the receptionist.', 'warning');
+      }
       setSessionId(null);
+      setRole(null);
+      setDoctorCode(null);
       setSettings({
         averageConsultationTime: 15,
         isInitialized: false,
         doctors: []
       });
+      setActiveQueue([]);
+      setSkippedQueue([]);
     });
 
     return () => {
@@ -243,7 +300,30 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [sessionId, isConnected, fetchInitialData]);
 
   // Actions
-  const joinSession = async (id: string): Promise<boolean> => {
+  const validateSession = async (id: string): Promise<Doctor[] | null> => {
+    try {
+      setLoading(true);
+      const cleanId = id.trim().toUpperCase();
+      const res = await fetch(`${API_URL}/api/queue/validate/${cleanId}`);
+      const data = await res.json();
+      if (!res.ok) {
+        addToast(data.message || 'Invalid Session ID.', 'error');
+        return null;
+      }
+      return data.settings.doctors || [];
+    } catch (err) {
+      addToast('Network error while validating Session ID.', 'error');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const joinSession = async (
+    id: string, 
+    selectedRole: 'receptionist' | 'doctor' | 'display', 
+    selectedDocCode?: string | null
+  ): Promise<boolean> => {
     try {
       setLoading(true);
       setError(null);
@@ -257,11 +337,13 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       setSessionId(cleanId);
+      setRole(selectedRole);
+      setDoctorCode(selectedDocCode || null);
       setSettings(data.settings);
-      addToast(`Joined session: ${cleanId}`, 'success');
+      addToast(`Connected to session: ${cleanId} (${selectedRole === 'display' ? 'Lobby Screen' : selectedRole})`, 'success');
       return true;
     } catch (err) {
-      addToast('Network error while validating Session ID.', 'error');
+      addToast('Network error while joining session.', 'error');
       return false;
     } finally {
       setLoading(false);
@@ -270,6 +352,8 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const leaveSession = () => {
     setSessionId(null);
+    setRole(null);
+    setDoctorCode(null);
     setSettings({
       averageConsultationTime: 15,
       isInitialized: false,
@@ -277,7 +361,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
     setActiveQueue([]);
     setSkippedQueue([]);
-    addToast('Logged out of session dashboard.', 'info');
+    addToast('Disconnected from session.', 'info');
   };
 
   const initializeSession = async (time: number, doctorsList: Doctor[]): Promise<string | null> => {
@@ -297,7 +381,10 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       
       setSessionId(data.sessionId);
+      setRole('receptionist');
+      setDoctorCode(null);
       setSettings(data.settings);
+      addToast(`Session created: ${data.sessionId}`, 'success');
       return data.sessionId;
     } catch (err: any) {
       addToast('Network error while initializing session.', 'error');
@@ -320,6 +407,8 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (!res.ok) throw new Error(data.message || 'Error resetting session');
       
       setSessionId(null);
+      setRole(null);
+      setDoctorCode(null);
       setSettings({
         averageConsultationTime: 15,
         isInitialized: false,
@@ -469,7 +558,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  const updateSettings = async (time: number) => {
+  const updateSettings = async (time: number, status?: 'open' | 'lunch-break' | 'closed', doctorsList?: Doctor[], mostMsg?: string, leastMsg?: string) => {
     if (!sessionId) return;
     try {
       setLoading(true);
@@ -480,7 +569,13 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           'Content-Type': 'application/json',
           'x-session-id': sessionId
         },
-        body: JSON.stringify({ averageConsultationTime: time })
+        body: JSON.stringify({ 
+          averageConsultationTime: time,
+          sessionStatus: status,
+          doctors: doctorsList,
+          mostSignificantMessage: mostMsg,
+          leastSignificantMessage: leastMsg
+        })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Error updating settings');
@@ -495,6 +590,8 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     <QueueContext.Provider
       value={{
         sessionId,
+        role,
+        doctorCode,
         activeQueue,
         skippedQueue,
         settings,
@@ -503,6 +600,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isConnected,
         loading,
         error,
+        validateSession,
         joinSession,
         leaveSession,
         initializeSession,

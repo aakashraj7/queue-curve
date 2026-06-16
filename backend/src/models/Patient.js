@@ -16,7 +16,7 @@ const PatientSchema = new mongoose.Schema({
   },
   assignedDoctors: {
     type: [String],
-    default: ['all']
+    default: ['ALL']
   },
   status: {
     type: String,
