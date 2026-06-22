@@ -193,7 +193,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     const socketConnection = io(API_URL, {
       withCredentials: true,
-      transports: ['websocket', 'polling']
+      transports: ['polling', 'websocket']
     });
 
     socketRef.current = socketConnection;

@@ -12,29 +12,13 @@ const server = http.createServer(app);
 // Connect to Database
 connectDB();
 
-// Setup CORS configurations to support Vercel domains and local dev environments dynamically
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  process.env.FRONTEND_URL
-].filter(Boolean);
-
+// Setup CORS configurations to support all client origins dynamically for hackathon robustness
 const corsOriginChecker = (origin, callback) => {
-  // Allow requests with no origin (like server-to-server or postman)
-  if (!origin) return callback(null, true);
-
-  const isAllowed = allowedOrigins.some(allowed => {
-    const cleanAllowed = allowed.endsWith('/') ? allowed.slice(0, -1) : allowed;
-    return origin === cleanAllowed;
-  });
-
-  const isVercel = origin.endsWith('.vercel.app');
-
-  if (isAllowed || isVercel) {
-    callback(null, true);
-  } else {
-    callback(null, false); // Block other origins safely without throwing unhandled exceptions
+  // Allow all origins dynamically with credentials. This echoes the request origin back to Access-Control-Allow-Origin
+  if (origin) {
+    console.log(`CORS allowed for origin: ${origin}`);
   }
+  callback(null, true);
 };
 
 app.use(cors({
