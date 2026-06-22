@@ -66,7 +66,18 @@ const getQueueData = async (sessionId) => {
       waitCount++;
     }
   }
-  const averageWaitTime = waitCount > 0 ? parseFloat(((totalWaitTimeMs / (1000 * 60)) / waitCount).toFixed(1)) : 0;
+  // Blended average wait time prediction when historical data is scarce (less than 5 visits)
+  const targetVisits = 5;
+  const configuredConsultTime = settings.averageConsultationTime || 15;
+  const actualAvgWaitTime = waitCount > 0 ? (totalWaitTimeMs / (1000 * 60)) / waitCount : 0;
+  
+  let blendedWaitTime;
+  if (waitCount >= targetVisits) {
+    blendedWaitTime = actualAvgWaitTime;
+  } else {
+    blendedWaitTime = ((actualAvgWaitTime * waitCount) + (configuredConsultTime * (targetVisits - waitCount))) / targetVisits;
+  }
+  const averageWaitTime = parseFloat(blendedWaitTime.toFixed(1));
 
   // Consultation time calculations (from arrived/serving to completed)
   let totalConsultationTimeMs = 0;
