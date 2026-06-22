@@ -76,7 +76,18 @@ interface QueueContextType {
 
 const QueueContext = createContext<QueueContextType | undefined>(undefined);
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+let rawApiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+if (rawApiUrl && !rawApiUrl.startsWith('http://') && !rawApiUrl.startsWith('https://')) {
+  if (rawApiUrl.includes('localhost') || rawApiUrl.includes('127.0.0.1')) {
+    rawApiUrl = 'http://' + rawApiUrl;
+  } else {
+    rawApiUrl = 'https://' + rawApiUrl;
+  }
+}
+if (rawApiUrl.endsWith('/')) {
+  rawApiUrl = rawApiUrl.slice(0, -1);
+}
+const API_URL = rawApiUrl;
 
 export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [sessionId, setSessionId] = useState<string | null>(() => {
