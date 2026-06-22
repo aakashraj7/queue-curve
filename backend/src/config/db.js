@@ -6,7 +6,8 @@ const connectDB = async () => {
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
     console.error(`Error connecting to MongoDB: ${error.message}`);
-    process.exit(1);
+    // Do not call process.exit(1) so the server can still bind to the port and serve,
+    // which prevents 502 Bad Gateway errors on Railway.
   }
 };
 
